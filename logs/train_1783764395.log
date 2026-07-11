@@ -1,0 +1,56 @@
+Using model from: /Users/benediction/Desktop/doc/mt-platform/pre_models/yolo11m.pt
+Loading model...
+Model loaded: task=detect, classes={0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light', 10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench', 14: 'bird', 15: 'cat', 16: 'dog', 17: 'horse', 18: 'sheep', 19: 'cow', 20: 'elephant', 21: 'bear', 22: 'zebra', 23: 'giraffe', 24: 'backpack', 25: 'umbrella', 26: 'handbag', 27: 'tie', 28: 'suitcase', 29: 'frisbee', 30: 'skis', 31: 'snowboard', 32: 'sports ball', 33: 'kite', 34: 'baseball bat', 35: 'baseball glove', 36: 'skateboard', 37: 'surfboard', 38: 'tennis racket', 39: 'bottle', 40: 'wine glass', 41: 'cup', 42: 'fork', 43: 'knife', 44: 'spoon', 45: 'bowl', 46: 'banana', 47: 'apple', 48: 'sandwich', 49: 'orange', 50: 'broccoli', 51: 'carrot', 52: 'hot dog', 53: 'pizza', 54: 'donut', 55: 'cake', 56: 'chair', 57: 'couch', 58: 'potted plant', 59: 'bed', 60: 'dining table', 61: 'toilet', 62: 'tv', 63: 'laptop', 64: 'mouse', 65: 'remote', 66: 'keyboard', 67: 'cell phone', 68: 'microwave', 69: 'oven', 70: 'toaster', 71: 'sink', 72: 'refrigerator', 73: 'book', 74: 'clock', 75: 'vase', 76: 'scissors', 77: 'teddy bear', 78: 'hair drier', 79: 'toothbrush'}
+auto_resume enabled but no last.pt found, starting fresh
+Starting training: /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/data.yaml
+New https://pypi.org/project/ultralytics/8.4.92 available 😃 Update with 'pip install -U ultralytics'
+Ultralytics 8.3.222 🚀 Python-3.11.9 torch-2.12.1 CPU (Apple M2)
+[34m[1mengine/trainer: [0magnostic_nms=False, amp=True, augment=False, auto_augment=randaugment, batch=2, bgr=0.0, box=7.5, cache=False, cfg=None, classes=None, close_mosaic=10, cls=0.5, compile=False, conf=None, copy_paste=0.0, copy_paste_mode=flip, cos_lr=False, cutmix=0.0, data=/Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/data.yaml, degrees=0.0, deterministic=True, device=cpu, dfl=1.5, dnn=False, dropout=0.0, dynamic=False, embed=None, epochs=100, erasing=0.4, exist_ok=True, fliplr=0.5, flipud=0.0, format=torchscript, fraction=1.0, freeze=None, half=False, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4, imgsz=640, int8=False, iou=0.7, keras=False, kobj=1.0, line_width=None, lr0=0.01, lrf=0.01, mask_ratio=4, max_det=300, mixup=0.0, mode=train, model=/Users/benediction/Desktop/doc/mt-platform/pre_models/yolo11m.pt, momentum=0.937, mosaic=1.0, multi_scale=False, name=train_1783764395, nbs=64, nms=False, opset=None, optimize=False, optimizer=SGD, overlap_mask=True, patience=100, perspective=0.0, plots=True, pose=12.0, pretrained=True, profile=False, project=/Users/benediction/Desktop/doc/mt-platform/runs/train, rect=False, resume=False, retina_masks=False, save=True, save_conf=False, save_crop=False, save_dir=/Users/benediction/Desktop/doc/mt-platform/runs/train/train_1783764395, save_frames=False, save_json=False, save_period=-1, save_txt=False, scale=0.5, seed=0, shear=0.0, show=False, show_boxes=True, show_conf=True, show_labels=True, simplify=True, single_cls=False, source=None, split=val, stream_buffer=False, task=detect, time=None, tracker=botsort.yaml, translate=0.1, val=True, verbose=True, vid_stride=1, visualize=False, warmup_bias_lr=0.1, warmup_epochs=3.0, warmup_momentum=0.8, weight_decay=0.0005, workers=8, workspace=None
+Overriding model.yaml nc=80 with nc=3
+
+                   from  n    params  module                                       arguments                     
+  0                  -1  1      1856  ultralytics.nn.modules.conv.Conv             [3, 64, 3, 2]                 
+  1                  -1  1     73984  ultralytics.nn.modules.conv.Conv             [64, 128, 3, 2]               
+  2                  -1  1    111872  ultralytics.nn.modules.block.C3k2            [128, 256, 1, True, 0.25]     
+  3                  -1  1    590336  ultralytics.nn.modules.conv.Conv             [256, 256, 3, 2]              
+  4                  -1  1    444928  ultralytics.nn.modules.block.C3k2            [256, 512, 1, True, 0.25]     
+  5                  -1  1   2360320  ultralytics.nn.modules.conv.Conv             [512, 512, 3, 2]              
+  6                  -1  1   1380352  ultralytics.nn.modules.block.C3k2            [512, 512, 1, True]           
+  7                  -1  1   2360320  ultralytics.nn.modules.conv.Conv             [512, 512, 3, 2]              
+  8                  -1  1   1380352  ultralytics.nn.modules.block.C3k2            [512, 512, 1, True]           
+  9                  -1  1    656896  ultralytics.nn.modules.block.SPPF            [512, 512, 5]                 
+ 10                  -1  1    990976  ultralytics.nn.modules.block.C2PSA           [512, 512, 1]                 
+ 11                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 12             [-1, 6]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 13                  -1  1   1642496  ultralytics.nn.modules.block.C3k2            [1024, 512, 1, True]          
+ 14                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 15             [-1, 4]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 16                  -1  1    542720  ultralytics.nn.modules.block.C3k2            [1024, 256, 1, True]          
+ 17                  -1  1    590336  ultralytics.nn.modules.conv.Conv             [256, 256, 3, 2]              
+ 18            [-1, 13]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 19                  -1  1   1511424  ultralytics.nn.modules.block.C3k2            [768, 512, 1, True]           
+ 20                  -1  1   2360320  ultralytics.nn.modules.conv.Conv             [512, 512, 3, 2]              
+ 21            [-1, 10]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 22                  -1  1   1642496  ultralytics.nn.modules.block.C3k2            [1024, 512, 1, True]          
+ 23        [16, 19, 22]  1   1413337  ultralytics.nn.modules.head.Detect           [3, [256, 512, 512]]          
+YOLO11m summary: 231 layers, 20,055,321 parameters, 20,055,305 gradients, 68.2 GFLOPs
+
+Transferred 643/649 items from pretrained weights
+Freezing layer 'model.23.dfl.conv.weight'
+[34m[1mtrain: [0mFast image access ✅ (ping: 0.0±0.0 ms, read: 481.9±191.2 MB/s, size: 213.8 KB)
+[K[34m[1mtrain: [0mScanning /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/labels... 119 images, 0 backgrounds, 0 corrupt: 53% ━━━━━━────── 119/225 356.4it/s 0.1s<0.3s[K[34m[1mtrain: [0mScanning /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/labels... 225 images, 0 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 225/225 1.4Kit/s 0.2s[K[34m[1mtrain: [0mScanning /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/labels... 225 images, 0 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 225/225 1.4Kit/s 0.2s
+[34m[1mtrain: [0m/Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/images/1-1_p1_Color_png.rf.22b681385a987b844a40c13f9f60bc2e.jpg: 1 duplicate labels removed
+[34m[1mtrain: [0m/Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/images/1-1_p1_Color_png.rf.2bfbab716f54f8fd0dc7ecc72c60312b.jpg: 1 duplicate labels removed
+[34m[1mtrain: [0m/Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/images/1-1_p1_Color_png.rf.fc66d379bb245a162e1b8b50733abdf4.jpg: 1 duplicate labels removed
+[34m[1mtrain: [0mNew cache created: /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/train/labels.cache
+[34m[1mval: [0mFast image access ✅ (ping: 0.0±0.0 ms, read: 406.2±141.4 MB/s, size: 163.4 KB)
+[K[34m[1mval: [0mScanning /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/valid/labels.cache... 15 images, 0 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 15/15 3.0Mit/s 0.0s[K[34m[1mval: [0mScanning /Users/benediction/Desktop/doc/mt-platform/uploads/training_datasets/archive/valid/labels.cache... 15 images, 0 backgrounds, 0 corrupt: 100% ━━━━━━━━━━━━ 15/15 163.0Kit/s 0.0s
+Plotting labels to /Users/benediction/Desktop/doc/mt-platform/runs/train/train_1783764395/labels.jpg... 
+[34m[1moptimizer:[0m SGD(lr=0.01, momentum=0.937) with parameter groups 106 weight(decay=0.0), 113 weight(decay=0.0005), 112 bias(decay=0.0)
+Image sizes 640 train, 640 val
+Using 0 dataloader workers
+Logging results to [1m/Users/benediction/Desktop/doc/mt-platform/runs/train/train_1783764395[0m
+Starting training for 100 epochs...
+
+      Epoch    GPU_mem   box_loss   cls_loss   dfl_loss  Instances       Size
+[K      1/100         0G      1.775      4.222      1.286         90        640: 0% ──────────── 0/113  5.5s[K      1/100         0G      1.949      4.287      1.329        178        640: 1% ──────────── 1/113 0.1it/s 10.7s<31:54[K      1/100         0G       1.83      4.272      1.288         99        640: 2% ──────────── 2/113 0.1it/s 15.2s<17:18[K      1/100         0G      1.915      4.343      1.295        101        640: 3% ──────────── 3/113 0.1it/s 20.1s<13:25[K      1/100         0G      1.937      4.324      1.339        140        640: 4% ──────────── 4/113 0.2it/s 24.8s<11:24[K      1/100         0G      1.932      4.345      1.317        167        640: 4% ╸─────────── 5/113 0.2it/s 29.5s<10:17[K      1/100         0G       1.95      4.328      1.323        151        640: 5% ╸─────────── 6/113 0.2it/s 33.8s<9:14[K      1/100         0G       1.94      4.344      1.342         64        640: 6% ╸─────────── 7/113 0.2it/s 38.4s<8:49[K      1/100         0G      1.982      4.335      1.346        201        640: 7% ╸─────────── 8/113 0.2it/s 43.0s<8:34[K      1/100         0G      1.985      4.347      1.352        117        640: 8% ╸─────────── 9/113 0.2it/s 47.9s<8:27[K      1/100         0G      1.964      4.314      1.337        131        640: 9% ━─────────── 10/113 0.2it/s 52.5s<8:13[K      1/100         0G      2.001      4.316      1.354         82        640: 10% ━─────────── 11/113 0.2it/s 57.4s<8:13[K      1/100         0G      1.981      4.292      1.343        148        640: 11% ━─────────── 12/113 0.2it/s 1:02<7:46[K      1/100         0G      1.999      4.269      1.347        146        640: 12% ━─────────── 13/113 0.2it/s 1:07<7:51[K      1/100         0G       1.97      4.248      1.338         71        640: 12% ━─────────── 14/113 0.2it/s 1:11<7:50[K      1/100         0G      1.966       4.22      1.337        158        640: 13% ━╸────────── 15/113 0.2it/s 1:19<8:41[K      1/100         0G      1.959      4.178      1.337        112        640: 14% ━╸────────── 16/113 0.2it/s 1:24<8:39

@@ -1,0 +1,15 @@
+﻿# clion
+.idea/
+# vs
+.vs
+
+uploads
+runs
+tmp
+dist
+build
+venv
+__pycache__
+app/__pycache__
+static/storage
+/pre_models
