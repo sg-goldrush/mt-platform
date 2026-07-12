@@ -721,6 +721,22 @@ textarea { resize: vertical; min-height: 80px; }
     font-weight: 500;
 }
 
+/* Annotation page — light sidebar image list */
+.page-annotation .image-list-sidebar .image-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; cursor: pointer;
+    border-left: 3px solid transparent;
+    border-radius: 0; transition: all 0.15s;
+}
+.page-annotation .image-list-sidebar .image-item:hover { background: #F1F5F9; }
+.page-annotation .image-list-sidebar .image-item.selected { background: #EBF4FF; border-left-color: #3B82F6; }
+.page-annotation .image-list-sidebar .image-item img { width: 36px; height: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+.page-annotation .image-list-sidebar .image-item .image-name { flex: 1; font-size: 11px; color: #2d3748; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.page-annotation .annotation-badge { font-size: 10px; background: #3B82F6; color: #fff; padding: 1px 5px; border-radius: 100px; flex-shrink: 0; }
+
+/* Color dot for annotation items */
+.color-dot { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+
 .class-edit-btn, .class-delete-btn {
     opacity: 0;
     padding: 2px 6px;
@@ -1378,7 +1394,26 @@ textarea { resize: vertical; min-height: 80px; }
 }
 
 /* ==========================================
-   19. RESPONSIVE / IFRAME
+   19. ANNOTATION IMAGE CHECKBOX
+   ========================================== */
+
+.image-item { position: relative; }
+.image-item .img-checkbox {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    width: 16px;
+    height: 16px;
+    accent-color: var(--color-accent);
+    cursor: pointer;
+    opacity: 0.6;
+}
+.image-item:hover .img-checkbox,
+.image-item.checked .img-checkbox { opacity: 1; }
+
+/* ==========================================
+   20. RESPONSIVE / IFRAME
    ========================================== */
 
 @media (max-width: 1200px) {
@@ -1397,5 +1432,139 @@ textarea { resize: vertical; min-height: 80px; }
     .file-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
     .modal-content { margin: 2% auto; width: 95%; max-height: 92vh; }
 }
+
+/* ==========================================
+   20. AUTH — Login button & modal
+   ========================================== */
+
+.auth-area {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.auth-user {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.auth-user .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.btn-login {
+    background: var(--color-accent);
+    color: #fff !important;
+    border: none;
+    padding: 7px 16px;
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.15s;
+}
+.btn-login:hover { background: var(--color-accent-hover); }
+
+.btn-logout {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--navbar-border);
+    padding: 5px 12px;
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-xs);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.btn-logout:hover { color: #e53e3e; border-color: #e53e3e; }
+
+.btn-dashboard {
+    background: transparent;
+    color: var(--color-accent);
+    border: 1px solid var(--color-accent);
+    padding: 6px 14px;
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+}
+.btn-dashboard:hover { background: var(--color-accent); color: #fff; }
+
+/* Login modal specifics */
+.login-modal-content {
+    max-width: 380px !important;
+}
+
+.login-modal-content .form-group {
+    margin-bottom: 16px;
+}
+
+.login-modal-content label {
+    display: block;
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.login-modal-content input[type="text"],
+.login-modal-content input[type="password"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #e2e8f0;
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    outline: none;
+    transition: border-color 0.15s;
+}
+.login-modal-content input:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(66,153,225,0.15);
+}
+
+.login-modal-content .form-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 6px;
+}
+
+.login-modal-content .register-link {
+    font-size: var(--font-size-xs);
+    color: var(--color-accent);
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+}
+.login-modal-content .register-link:hover { text-decoration: underline; }
+
+.login-modal-content .error-msg {
+    color: #e53e3e;
+    font-size: var(--font-size-xs);
+    margin-top: 8px;
+    display: none;
+}
+.login-modal-content .error-msg.show { display: block; }
 
 .auto-label-container.iframe-mode .file-manager { margin: 0; border-radius: 0; box-shadow: none; }

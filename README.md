@@ -1,63 +1,50 @@
 # mt-platform
 
-YOLO 模型训练平台，基于 Flask + Ultralytics YOLO11。
+机器视觉标注与训练一体化平台。
 
-### 核心功能
-- YOLO 模型训练全流程：数据集上传、模型选择、断点恢复、模型测试、下载
-- 支持 CPU / GPU 训练
-- 实时训练进度、日志、指标监控
-- YOLO 格式数据集上传（ZIP）
+## 功能
 
-### 使用说明
+- **数据集管理** — ZIP 上传、在线标注（YOLO OBB/检测）、类别筛选统计
+- **模型训练** — YOLOv11，CPU/GPU，实时进度，断点恢复
+- **AI 辅助标注** — 已训练模型批量推理，IoU 去重
+- **多用户系统** — 鉴权登录、管理员看板、数据隔离、存储配额管控
 
-1. **安装依赖**：
-   ```bash
-   python -m venv venv
+## 快速开始
 
-   # Linux/Mac
-   source venv/bin/activate
+```bash
+pip install -r requirements.txt
+python app.py --host 0.0.0.0 --port 9924
+```
 
-   # Windows
-   venv\Scripts\activate
+访问 http://127.0.0.1:9924
 
-   pip install -r requirements.txt
+## 生产部署
 
-   # 训练依赖
-   pip install ultralytics==8.3.1
-   pip install numpy==1.26.4
+```bash
+gunicorn -k gevent -w 2 -b 0.0.0.0:9924 app:app
+```
 
-   # CPU 版 torch
-   pip install torch==2.1.2 torchvision==0.16.2
+## 项目结构
 
-   # CUDA 版 torch
-   pip install torch==2.1.0 torchaudio==2.1.0 torchvision==0.16.0 --index-url https://download.pytorch.org/whl/cu121
-   ```
-
-2. **启动服务**：
-   ```bash
-   python app.py --host 0.0.0.0 --port 9924
-   ```
-
-3. **访问**：http://127.0.0.1:9924
-
-### 项目结构
 ```
 mt-platform/
 ├── app.py                    # 主应用
-├── requirements.txt          # 依赖列表
+├── requirements.txt
 ├── static/                   # 静态资源
-├── templates/
-│   ├── base.html             # 基模板
-│   └── training.html         # 训练页面
-├── pre_models/               # 预训练模型（.pt）
-├── uploads/
-│   └── training_datasets/    # 训练数据集
+├── templates/                # 页面模板
+│   ├── training.html         # 训练页面
+│   ├── annotation.html       # 标注页面
+│   └── dashboard.html        # 管理员看板
+├── pre_models/               # 预训练模型
+├── uploads/                  # 用户数据（按用户隔离）
 ├── runs/                     # 训练输出
 └── tmp/                      # 临时文件
 ```
 
-### 技术栈
-Flask + Flask-SocketIO | Ultralytics YOLO11 | Socket.IO
+## 致谢
 
-### 授权协议
+本项目基于 [xclabel](https://github.com/beixiaocai/xclabel) (MIT License) 二次开发，借鉴了其 UI 设计和标注交互逻辑。
+
+## License
+
 MIT

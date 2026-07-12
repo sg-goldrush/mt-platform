@@ -1,0 +1,966 @@
+{% extends "base.html" %}
+
+{% block title %}标注面板 — mt-platform{% endblock %}
+{% block body_class %}page-annotation{% endblock %}
+
+{% block body %}
+<!-- 通用 Modal -->
+<div class="modal" id="appModal" onclick="if(event.target===this)closeAppModal()">
+    <div class="modal-content" style="max-width: 440px;">
+        <div class="modal-header">
+            <h3 id="appModalTitle"><i class="fas fa-info-circle"></i> <span></span></h3>
+            <button type="button" onclick="closeAppModal()" style="background:none;border:none;font-size:20px;color:#94a3b8;cursor:pointer;line-height:1;">&times;</button>
+        </div>
+        <div class="modal-body" id="appModalBody"></div>
+        <div class="modal-footer" id="appModalFooter"></div>
+    </div>
+</div>
+
+<div class="training-container">
+    <header class="navbar">
+        <div class="logo">
+            <img src="{{ url_for('static', filename='images/logo.svg') }}" alt="logo" style="height: 28px;">
+            <h1><span class="logo-accent">mt-</span>platform <span class="version">{{ version }}</span></h1>
+        </div>
+        <div class="nav-buttons">
+            <a class="btn btn-secondary btn-sm" href="/">训练面板</a>
+        </div>
+    </header>
+
+    <div class="main-content" style="display:flex;flex:1;overflow:hidden;padding:0;">
+        <!-- ====== 左侧：图片列表 ====== -->
+        <div class="image-list-sidebar" style="width:260px;flex-shrink:0;display:flex;flex-direction:column;background:#fff;border-right:1px solid var(--workspace-border);">
+            <!-- 数据集选择 -->
+            <div style="padding:10px 10px 6px;display:flex;gap:4px;align-items:center;">
+                <select id="datasetSelect" onchange="onDatasetChange()" style="flex:1;font-size:12px;min-width:0;">
+                    <option value="">-- 选择数据集 --</option>
+                </select>
+                <button class="btn btn-secondary btn-sm" onclick="refreshDatasets()" title="刷新" style="font-size:11px;width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;"><i class="fas fa-sync-alt"></i></button>
+            </div>
+            <!-- 上传区域 -->
+            <div style="padding:4px 10px 8px;display:flex;gap:4px;flex-wrap:wrap;">
+                <button class="btn btn-primary btn-sm" onclick="document.getElementById('zipFileInput').click()" style="flex:1;font-size:11px;"><i class="fas fa-file-archive"></i> 上传ZIP</button>
+                <input type="file" id="zipFileInput" accept=".zip" style="display:none;" onchange="uploadDatasetZip(this.files)">
+                <button class="btn btn-secondary btn-sm" onclick="document.getElementById('addImageInput').click()" style="flex:1;font-size:11px;"><i class="fas fa-plus"></i> 追加图片</button>
+                <input type="file" id="addImageInput" accept="image/*,.zip" multiple style="display:none;" onchange="addImagesToDataset(this.files)">
+                <button class="btn btn-secondary btn-sm" onclick="deleteCurrentImage()" style="font-size:11px;" title="删除当前图片"><i class="fas fa-trash"></i></button>
+                <button class="btn btn-secondary btn-sm" onclick="downloadDataset()" style="font-size:11px;" title="下载数据集"><i class="fas fa-download"></i></button>
+            </div>
+            <div class="image-search" style="padding:4px 10px;">
+                <input type="text" id="imageSearch" placeholder="搜索图片..." oninput="filterImages()" style="width:100%;padding:4px 8px;font-size:11px;border:1px solid #e2e8f0;border-radius:4px;">
+            </div>
+            <div class="image-list" id="imageList" style="flex:1;overflow-y:auto;padding:4px;">
+                <p style="text-align:center;color:#94a3b8;padding:30px 10px;font-size:12px;">请先上传数据集</p>
+            </div>
+        </div>
+
+        <!-- ====== 中间：Canvas 画布 ====== -->
+        <div style="flex:1;display:flex;flex-direction:column;background:#f1f5f9;position:relative;overflow:hidden;">
+            <div class="drawing-tools" id="drawingTools" style="display:flex;align-items:center;gap:4px;padding:6px 10px;background:#fff;border-bottom:1px solid #e2e8f0;">
+                <button class="tool-btn active" data-tool="draw" onclick="setTool('draw')" title="绘制矩形框 (R)"><i class="fas fa-vector-square"></i></button>
+                <button class="tool-btn" data-tool="select" onclick="setTool('select')" title="选择/移动 (V)"><i class="fas fa-mouse-pointer"></i></button>
+                <span style="width:1px;height:20px;background:#e2e8f0;margin:0 4px;"></span>
+                <button class="tool-btn" onclick="deleteSelected()" title="删除选中 (Del)"><i class="fas fa-trash-alt"></i></button>
+                <button class="tool-btn" onclick="undoAnnotation()" title="撤销 (Ctrl+Z)"><i class="fas fa-undo"></i></button>
+                <span style="flex:1;"></span>
+                <span style="font-size:11px;color:#4a5568;font-weight:500;" id="datasetLabel"></span>
+                <span style="width:1px;height:20px;background:#e2e8f0;margin:0 4px;"></span>
+                <button class="tool-btn" onclick="zoomFit()" title="适应画面"><i class="fas fa-expand-arrows-alt"></i></button>
+                <span style="font-size:11px;color:#94a3b8;" id="canvasInfo"></span>
+            </div>
+            <div id="canvasContainer" style="flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;">
+                <canvas id="imageCanvas" style="cursor:crosshair;"></canvas>
+                <div class="no-image-message" id="noImageMsg" style="position:absolute;color:#94a3b8;text-align:center;pointer-events:none;">
+                    <i class="fas fa-image" style="font-size:48px;display:block;margin-bottom:12px;"></i>
+                    <span>选择左侧图片开始标注</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ====== 右侧：标注面板 ====== -->
+        <div class="annotation-panel" style="width:260px;flex-shrink:0;display:flex;flex-direction:column;background:#fff;border-left:1px solid var(--workspace-border);overflow-y:auto;">
+            <div style="padding:10px 14px;border-bottom:1px solid #e2e8f0;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                    <h4 style="font-size:12px;font-weight:600;color:#2d3748;"><i class="fas fa-tags"></i> 类别管理</h4>
+                    <div style="display:flex;gap:4px;">
+                        <button class="btn btn-secondary btn-sm" onclick="filterClassIdx=null;renderClassList();renderImageList();" style="font-size:10px;padding:2px 6px;" title="显示全部">全部</button>
+                        <button class="btn btn-secondary btn-sm" onclick="addClass()" style="font-size:11px;padding:2px 6px;"><i class="fas fa-plus"></i></button>
+                    </div>
+                </div>
+                <div class="class-list" id="classList" style="display:flex;flex-wrap:wrap;gap:4px;">
+                    <span style="font-size:11px;color:#94a3b8;">暂无类别</span>
+                </div>
+                <div id="classStats" style="margin-top:6px;font-size:10px;color:#94a3b8;text-align:center;"></div>
+            </div>
+
+            <!-- 模型推理 -->
+            <div style="padding:10px 14px;border-bottom:1px solid #e2e8f0;">
+                <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:6px;"><i class="fas fa-robot"></i> 模型推理</h4>
+                <select id="inferenceModel" style="width:100%;font-size:11px;margin-bottom:4px;">
+                    <option value="">-- 选择模型 --</option>
+                </select>
+                <div style="display:flex;gap:4px;align-items:center;margin-bottom:4px;">
+                    <span style="font-size:10px;color:#94a3b8;">置信度</span>
+                    <input type="number" id="inferenceConf" value="0.25" min="0.01" max="1" step="0.05" style="width:70px;font-size:12px;padding:3px 6px;border:1px solid #e2e8f0;border-radius:4px;">
+                    <span style="font-size:10px;color:#94a3b8;flex:1;text-align:right;" id="selectedCount">已选 0 张</span>
+                </div>
+                <button class="btn btn-primary" onclick="runInference()" id="inferenceBtn" disabled style="width:100%;font-size:11px;">
+                    <i class="fas fa-magic"></i> 推理标注
+                </button>
+            </div>
+
+            <!-- 标注列表 -->
+            <div style="padding:10px 14px;flex:1;overflow-y:auto;">
+                <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:6px;"><i class="fas fa-list"></i> 标注列表 <span id="annotationCount" style="color:#4299e1;">(0)</span></h4>
+                <div id="annotationList" style="font-size:11px;color:#94a3b8;">选择图片后查看标注</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    var currentTool = 'draw';
+    var images = [];
+    var currentImage = null;
+    var annotations = [];
+    var classes = [];
+    var selectedAnnotation = null;
+    var canvasScale = 1;
+    var canvasOffsetX = 0, canvasOffsetY = 0;
+    var isDrawing = false;
+    var drawStartX, drawStartY;
+    var dragMode = null;
+    var dragStartPoints = null;
+    var undoStack = [];
+    var HANDLE_SIZE = 8;
+    var COLORS = ['#3B82F6','#EF4444','#10B981','#F59E0B','#8B5CF6','#EC4899','#06B6D4','#F97316','#6366F1','#14B8A6'];
+
+    var canvas = document.getElementById('imageCanvas');
+    var ctx = canvas.getContext('2d');
+
+    // ========== Modal ==========
+    var _modalResolve = null;
+    function closeAppModal() {
+        document.getElementById('appModal').classList.remove('active');
+        if (_modalResolve) { _modalResolve(false); _modalResolve = null; }
+    }
+
+    function showAlert(message, title) {
+        title = title || '提示';
+        return new Promise(function(resolve) {
+            document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-info-circle"></i> <span>' + title + '</span>';
+            document.getElementById('appModalBody').innerHTML = '<p style="font-size:14px;color:#475569;line-height:1.6;">' + message + '</p>';
+            document.getElementById('appModalFooter').innerHTML = '<button class="btn btn-primary" id="modalOkBtn">确定</button>';
+            document.getElementById('appModal').classList.add('active');
+            document.getElementById('modalOkBtn').onclick = function() {
+                document.getElementById('appModal').classList.remove('active');
+                resolve(true);
+            };
+        });
+    }
+
+    function showConfirm(message, title, confirmText, cancelText) {
+        title = title || '确认'; confirmText = confirmText || '确认'; cancelText = cancelText || '取消';
+        return new Promise(function(resolve) {
+            _modalResolve = resolve;
+            document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-question-circle" style="color:#f59e0b;"></i> <span>' + title + '</span>';
+            document.getElementById('appModalBody').innerHTML = '<p style="font-size:14px;color:#475569;line-height:1.6;">' + message + '</p>';
+            document.getElementById('appModalFooter').innerHTML =
+                '<button class="btn btn-secondary" id="modalCancelBtn">' + cancelText + '</button>' +
+                '<button class="btn btn-primary" id="modalConfirmBtn">' + confirmText + '</button>';
+            document.getElementById('appModal').classList.add('active');
+            document.getElementById('modalConfirmBtn').onclick = function() {
+                document.getElementById('appModal').classList.remove('active');
+                _modalResolve = null; resolve(true);
+            };
+            document.getElementById('modalCancelBtn').onclick = function() {
+                document.getElementById('appModal').classList.remove('active');
+                _modalResolve = null; resolve(false);
+            };
+        });
+    }
+
+    function showPrompt(title, defaultValue) {
+        defaultValue = defaultValue || '';
+        return new Promise(function(resolve) {
+            document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-pen" style="color:#4299e1;"></i> <span>' + title + '</span>';
+            document.getElementById('appModalBody').innerHTML = '<input id="modalPromptInput" type="text" value="' + defaultValue.replace(/"/g,'&quot;') + '" style="width:100%;padding:8px 12px;font-size:14px;border:1px solid #e2e8f0;border-radius:6px;outline:none;" onkeydown="if(event.key===\'Enter\')document.getElementById(\'modalPromptOk\').click()">';
+            document.getElementById('appModalFooter').innerHTML =
+                '<button class="btn btn-secondary" id="modalPromptCancel">取消</button>' +
+                '<button class="btn btn-primary" id="modalPromptOk">确认</button>';
+            document.getElementById('appModal').classList.add('active');
+            document.getElementById('modalPromptInput').focus();
+            document.getElementById('modalPromptInput').select();
+            document.getElementById('modalPromptOk').onclick = function() {
+                document.getElementById('appModal').classList.remove('active');
+                resolve(document.getElementById('modalPromptInput').value.trim());
+            };
+            document.getElementById('modalPromptCancel').onclick = function() {
+                document.getElementById('appModal').classList.remove('active');
+                resolve(null);
+            };
+        });
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            if (document.getElementById('appModal').classList.contains('active')) closeAppModal();
+        }
+    });
+
+    // ========== 数据集管理 ==========
+    function refreshDatasets() {
+        fetch('/api/annotation/datasets')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) return;
+            var sel = document.getElementById('datasetSelect');
+            var current = sel.value;
+            sel.innerHTML = '<option value="">-- 选择数据集 --</option>';
+            data.datasets.forEach(function(ds) {
+                sel.innerHTML += '<option value="' + ds.name + '"' + (ds.name === current ? ' selected' : '') + '> ' + ds.name + ' (' + ds.image_count + '张)</option>';
+            });
+            if (!current && data.active) {
+                sel.value = data.active;
+                onDatasetChange();
+            }
+        }).catch(function(err) { console.error(err); });
+    }
+
+    function onDatasetChange() {
+        var name = document.getElementById('datasetSelect').value;
+        document.getElementById('datasetLabel').textContent = name || '';
+
+        fetch('/api/annotation/dataset/set-active', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: name})
+        }).then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                currentImage = null;
+                annotations = [];
+                loadImages();
+                loadClasses();
+                clearCanvas();
+                renderAnnotationList();
+            }
+        }).catch(function(err) { console.error(err); });
+    }
+
+    function uploadDatasetZip(files) {
+        if (!files || files.length === 0) return;
+        var file = files[0];
+        if (!file.name.toLowerCase().endsWith('.zip')) { showAlert('仅支持 ZIP 格式'); return; }
+        if (file.size > 2 * 1024 * 1024 * 1024) { showAlert('ZIP 文件不能超过 2GB'); return; }
+
+        var formData = new FormData();
+        formData.append('file', file);
+
+        fetch('/api/annotation/dataset/upload', { method: 'POST', body: formData })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                document.getElementById('datasetSelect').value = data.dataset;
+                onDatasetChange();
+                showAlert(data.message, '成功');
+            } else {
+                showAlert(data.error, '上传失败');
+            }
+        }).catch(function(err) { showAlert(err.message, '上传失败'); });
+    }
+
+    function addImagesToDataset(files) {
+        if (!files || files.length === 0) return;
+        var ds = document.getElementById('datasetSelect').value;
+        if (!ds) { showAlert('请先选择数据集'); return; }
+
+        var formData = new FormData();
+        var hasZip = false;
+        for (var i = 0; i < files.length; i++) {
+            var f = files[i];
+            if (f.name.toLowerCase().endsWith('.zip')) {
+                formData.append('zip', f);
+                hasZip = true;
+            } else if (f.type.startsWith('image/')) {
+                formData.append('images', f);
+            }
+        }
+
+        fetch('/api/annotation/dataset/add-images', { method: 'POST', body: formData })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                loadImages();
+                showAlert(data.message, '成功');
+            } else {
+                showAlert(data.error, '失败');
+            }
+        }).catch(function(err) { showAlert(err.message, '失败'); });
+    }
+
+    function downloadDataset() {
+        var ds = document.getElementById('datasetSelect').value;
+        if (!ds) { showAlert('请先选择数据集'); return; }
+        window.open('/api/annotation/dataset/download', '_blank');
+    }
+
+    // ========== 图片管理 ==========
+    function loadImages() {
+        fetch('/api/annotation/dataset/images')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            images = data.images || [];
+            renderImageList();
+            // 自动选中第一张
+            if (!currentImage && images.length > 0) {
+                selectImage(images[0].name);
+            }
+        }).catch(function(err) { console.error(err); });
+    }
+
+    function renderImageList() {
+        var container = document.getElementById('imageList');
+        var q = (document.getElementById('imageSearch').value || '').toLowerCase();
+        var filtered = images;
+        if (q) filtered = filtered.filter(function(img) { return img.name.toLowerCase().indexOf(q) >= 0; });
+
+        // 按类别筛选: 只显示包含当前筛选类别的图片
+        if (filterClassIdx !== null) {
+            filtered = filtered.filter(function(img) {
+                return img.class_ids && img.class_ids.indexOf(filterClassIdx) >= 0;
+            });
+        }
+
+        if (filtered.length === 0) {
+            var msg = '暂无图片';
+            if (q) msg = '无匹配图片';
+            if (filterClassIdx !== null) msg = '没有含 ' + classes[filterClassIdx].name + ' 的图片';
+            container.innerHTML = '<p style="text-align:center;color:#94a3b8;padding:30px 10px;font-size:12px;">' + msg + '</p>';
+            return;
+        }
+        container.innerHTML = filtered.map(function(img) {
+            var sel = currentImage === img.name ? ' selected' : '';
+            var checked = selectedImages[img.name] ? ' checked' : '';
+            return '<div class="image-item' + sel + checked + '" onclick="onImageClick(event, \'' + img.name.replace(/'/g, "\\'") + '\')">' +
+                '<input type="checkbox" class="img-checkbox" ' + (selectedImages[img.name] ? 'checked' : '') + ' onclick="event.stopPropagation();toggleImageSelect(\'' + img.name.replace(/'/g, "\\'") + '\')">' +
+                '<img src="/api/annotation/dataset/image/' + encodeURIComponent(img.name) + '" loading="lazy">' +
+                '<div class="image-name">' + img.name + '</div>' +
+                '</div>';
+        }).join('');
+    }
+
+    function filterImages() { renderImageList(); }
+
+    function onImageClick(e, name) {
+        if (e.ctrlKey || e.metaKey) {
+            toggleImageSelect(name);
+        } else {
+            selectImage(name);
+        }
+    }
+
+    function toggleImageSelect(name) {
+        if (selectedImages[name]) {
+            delete selectedImages[name];
+        } else {
+            selectedImages[name] = true;
+        }
+        updateSelectedCount();
+        renderImageList();
+    }
+
+    function updateSelectedCount() {
+        var count = Object.keys(selectedImages).length;
+        document.getElementById('selectedCount').textContent = '已选 ' + count + ' 张';
+        document.getElementById('inferenceBtn').disabled = count === 0 || !document.getElementById('inferenceModel').value;
+    }
+
+    function selectImage(name) {
+        currentImage = name;
+        loadAnnotations(name);
+        loadImageToCanvas(name);
+        renderImageList();
+    }
+
+    function deleteCurrentImage() {
+        if (!currentImage) { showAlert('请先选择图片'); return; }
+        var ds = document.getElementById('datasetSelect').value;
+        if (!ds) return;
+
+        showConfirm('确定删除图片 <b>' + currentImage + '</b> 吗？', '删除确认', '删除', '取消')
+        .then(function(ok) {
+            if (!ok) return;
+            fetch('/api/annotation/dataset/image-delete', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({image: currentImage})
+            }).then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    var idx = images.findIndex(function(im) { return im.name === currentImage; });
+                    if (idx >= 0) images.splice(idx, 1);
+                    currentImage = null;
+                    annotations = [];
+                    clearCanvas();
+                    renderImageList();
+                    renderAnnotationList();
+                } else {
+                    showAlert(data.error, '删除失败');
+                }
+            });
+        });
+    }
+
+    // ========== Canvas ==========
+    var img = new Image();
+    function loadImageToCanvas(name) {
+        img.src = '/api/annotation/dataset/image/' + encodeURIComponent(name) + '?t=' + Date.now();
+        img.onload = function() {
+            document.getElementById('noImageMsg').style.display = 'none';
+            zoomFit();
+        };
+    }
+
+    function zoomFit() {
+        if (!img.src || !img.complete) return;
+        var container = document.getElementById('canvasContainer');
+        var cw = container.clientWidth - 20, ch = container.clientHeight - 20;
+        var scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
+        canvasScale = scale;
+        canvasOffsetX = Math.floor((container.clientWidth - img.naturalWidth * scale) / 2);
+        canvasOffsetY = Math.floor((container.clientHeight - img.naturalHeight * scale) / 2);
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        document.getElementById('canvasInfo').textContent = Math.round(scale * 100) + '%';
+        drawCanvas();
+    }
+
+    function clearCanvas() {
+        img.src = '';
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        document.getElementById('noImageMsg').style.display = 'block';
+        document.getElementById('canvasInfo').textContent = '';
+    }
+
+    function drawCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!img.src || !img.complete) return;
+        var iw = img.naturalWidth * canvasScale, ih = img.naturalHeight * canvasScale;
+        ctx.drawImage(img, canvasOffsetX, canvasOffsetY, iw, ih);
+
+        var filterName = filterClassIdx !== null ? classes[filterClassIdx].name : null;
+
+        annotations.forEach(function(ann, idx) {
+            // 筛选模式下只显示匹配类别的框
+            if (filterName && ann.class !== filterName) return;
+            var pts = ann.points;
+            if (pts.length < 2) return;
+            var x1 = pts[0].x * canvasScale + canvasOffsetX;
+            var y1 = pts[0].y * canvasScale + canvasOffsetY;
+            var x2 = pts[2].x * canvasScale + canvasOffsetX;
+            var y2 = pts[2].y * canvasScale + canvasOffsetY;
+            var w = x2 - x1, h = y2 - y1;
+
+            var isSel = selectedAnnotation === idx;
+            ctx.strokeStyle = ann.color || '#3B82F6';
+            ctx.lineWidth = isSel ? 3 : 2;
+            ctx.strokeRect(x1, y1, w, h);
+
+            var label = ann.class + (ann.confidence ? ' ' + (ann.confidence*100).toFixed(0)+'%' : '');
+            ctx.fillStyle = ann.color || '#3B82F6';
+            ctx.font = '11px sans-serif';
+            var tm = ctx.measureText(label);
+            var lw = tm.width + 6, lh = 16;
+            var ly = y1 - lh > 0 ? y1 - lh : y1;
+            ctx.fillRect(x1, ly, lw, lh);
+            ctx.fillStyle = '#fff';
+            ctx.fillText(label, x1 + 3, ly + 12);
+
+            if (isSel) {
+                ctx.fillStyle = '#fff';
+                ctx.strokeStyle = '#3B82F6';
+                ctx.lineWidth = 1;
+                [[x1,y1],[x2,y1],[x1,y2],[x2,y2],[x1+w/2,y1],[x1+w/2,y2],[x1,y1+h/2],[x2,y1+h/2]].forEach(function(p) {
+                    ctx.fillRect(p[0]-HANDLE_SIZE/2, p[1]-HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+                    ctx.strokeRect(p[0]-HANDLE_SIZE/2, p[1]-HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+                });
+            }
+        });
+    }
+
+    function canvasToImage(cx, cy) {
+        return {
+            x: Math.max(0, Math.min(img.naturalWidth, (cx - canvasOffsetX) / canvasScale)),
+            y: Math.max(0, Math.min(img.naturalHeight, (cy - canvasOffsetY) / canvasScale))
+        };
+    }
+
+    function imageToCanvas(ix, iy) {
+        return { x: ix * canvasScale + canvasOffsetX, y: iy * canvasScale + canvasOffsetY };
+    }
+
+    function getHandleAt(cx, cy) {
+        if (selectedAnnotation === null) return null;
+        var ann = annotations[selectedAnnotation];
+        var pts = ann.points;
+        if (pts.length < 2) return null;
+        var x1 = pts[0].x * canvasScale + canvasOffsetX;
+        var y1 = pts[0].y * canvasScale + canvasOffsetY;
+        var x2 = pts[2].x * canvasScale + canvasOffsetX;
+        var y2 = pts[2].y * canvasScale + canvasOffsetY;
+        var w = x2 - x1, h = y2 - y1;
+        var handles = {
+            'nw': [x1, y1], 'ne': [x2, y1], 'sw': [x1, y2], 'se': [x2, y2],
+            'n': [x1 + w/2, y1], 's': [x1 + w/2, y2],
+            'w': [x1, y1 + h/2], 'e': [x2, y1 + h/2]
+        };
+        for (var k in handles) {
+            if (Math.abs(cx - handles[k][0]) < HANDLE_SIZE && Math.abs(cy - handles[k][1]) < HANDLE_SIZE) return k;
+        }
+        return null;
+    }
+
+    function findAnnotationAt(cx, cy) {
+        for (var i = annotations.length - 1; i >= 0; i--) {
+            var pts = annotations[i].points;
+            if (pts.length < 2) continue;
+            var x1 = pts[0].x * canvasScale + canvasOffsetX;
+            var y1 = pts[0].y * canvasScale + canvasOffsetY;
+            var x2 = pts[2].x * canvasScale + canvasOffsetX;
+            var y2 = pts[2].y * canvasScale + canvasOffsetY;
+            if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) return i;
+        }
+        return -1;
+    }
+
+    canvas.addEventListener('mousedown', function(e) {
+        var rect = canvas.getBoundingClientRect();
+        var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+        if (!img.src || !img.complete) return;
+
+        if (currentTool === 'select') {
+            if (selectedAnnotation !== null) {
+                var handle = getHandleAt(cx, cy);
+                if (handle) { dragMode = 'resize-' + handle; return; }
+            }
+            var idx = findAnnotationAt(cx, cy);
+            if (idx >= 0) {
+                selectedAnnotation = idx;
+                dragMode = 'move';
+                dragStartPoints = JSON.parse(JSON.stringify(annotations[idx].points));
+                drawCanvas();
+                renderAnnotationList();
+            } else {
+                selectedAnnotation = null;
+                drawCanvas();
+                renderAnnotationList();
+            }
+        } else if (currentTool === 'draw') {
+            if (selectedClassIdx === null || selectedClassIdx >= classes.length) {
+                showAlert('请先在右侧选择一个类别，再画框');
+                return;
+            }
+            pushUndo();
+            var ip = canvasToImage(cx, cy);
+            isDrawing = true;
+            drawStartX = ip.x; drawStartY = ip.y;
+            var cls = classes[selectedClassIdx];
+            annotations.push({
+                id: 'ann_' + Date.now(),
+                class: cls.name,
+                color: cls.color,
+                type: 'rectangle',
+                points: [{x: ip.x, y: ip.y}, {x: ip.x, y: ip.y}]
+            });
+            selectedAnnotation = annotations.length - 1;
+        }
+    });
+
+    canvas.addEventListener('mousemove', function(e) {
+        updateCursor(e);
+        var rect = canvas.getBoundingClientRect();
+        var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+        if (!img.src || !img.complete) return;
+
+        if (isDrawing) {
+            var ip = canvasToImage(cx, cy);
+            var ann = annotations[selectedAnnotation];
+            ann.points = [
+                {x: Math.min(drawStartX, ip.x), y: Math.min(drawStartY, ip.y)},
+                {x: Math.max(drawStartX, ip.x), y: Math.min(drawStartY, ip.y)},
+                {x: Math.max(drawStartX, ip.x), y: Math.max(drawStartY, ip.y)},
+                {x: Math.min(drawStartX, ip.x), y: Math.max(drawStartY, ip.y)}
+            ];
+            drawCanvas();
+        } else if (dragMode === 'move' && selectedAnnotation !== null) {
+            ip = canvasToImage(cx, cy);
+            var orig = dragStartPoints;
+            var ow = orig[2].x - orig[0].x, oh = orig[2].y - orig[0].y;
+            var nx = Math.max(0, Math.min(img.naturalWidth - ow, ip.x - ow/2));
+            var ny = Math.max(0, Math.min(img.naturalHeight - oh, ip.y - oh/2));
+            annotations[selectedAnnotation].points = [
+                {x: nx, y: ny}, {x: nx + ow, y: ny},
+                {x: nx + ow, y: ny + oh}, {x: nx, y: ny + oh}
+            ];
+            drawCanvas();
+        } else if (dragMode && dragMode.indexOf('resize-') === 0 && selectedAnnotation !== null) {
+            ip = canvasToImage(cx, cy);
+            var ann = annotations[selectedAnnotation];
+            var x1 = ann.points[0].x, y1 = ann.points[0].y, x2 = ann.points[2].x, y2 = ann.points[2].y;
+            if (dragMode.indexOf('e') >= 0) x2 = ip.x;
+            if (dragMode.indexOf('w') >= 0) x1 = ip.x;
+            if (dragMode.indexOf('s') >= 0) y2 = ip.y;
+            if (dragMode.indexOf('n') >= 0) y1 = ip.y;
+            if (x2 < x1) { var t = x1; x1 = x2; x2 = t; }
+            if (y2 < y1) { t = y1; y1 = y2; y2 = t; }
+            ann.points = [{x: x1, y: y1}, {x: x2, y: y1}, {x: x2, y: y2}, {x: x1, y: y2}];
+            drawCanvas();
+        }
+    });
+
+    canvas.addEventListener('mouseup', function() {
+        if (isDrawing) {
+            isDrawing = false;
+            var ann = annotations[selectedAnnotation];
+            if (ann && ann.points[2].x - ann.points[0].x < 5 && ann.points[2].y - ann.points[0].y < 5) {
+                annotations.pop();
+                selectedAnnotation = null;
+            }
+            saveAnnotationsDebounced();
+            renderAnnotationList();
+        }
+        if (dragMode) {
+            dragMode = null;
+            dragStartPoints = null;
+            if (!isDrawing) saveAnnotationsDebounced();
+        }
+        drawCanvas();
+    });
+
+    // ========== 标注操作 ==========
+    function loadAnnotations(name) {
+        fetch('/api/annotation/dataset/annotations/' + encodeURIComponent(name))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            annotations = Array.isArray(data) ? data : [];
+            selectedAnnotation = null;
+            undoStack = [];
+            drawCanvas();
+            renderAnnotationList();
+        }).catch(function(err) { console.error(err); });
+    }
+
+    var saveTimer;
+    function saveAnnotationsDebounced() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveAnnotations, 500);
+    }
+
+    function saveAnnotations() {
+        if (!currentImage) return;
+        var toSave = annotations.map(function(a) {
+            return {class: a.class, color: a.color, type: 'rectangle', points: a.points};
+        });
+        fetch('/api/annotation/dataset/annotations/' + encodeURIComponent(currentImage), {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(toSave)
+        }).then(function() { loadImages(); }).catch(function(err) { console.error(err); });
+    }
+
+    function pushUndo() {
+        undoStack.push(JSON.parse(JSON.stringify(annotations)));
+    }
+
+    function undoAnnotation() {
+        if (undoStack.length === 0) return;
+        annotations = undoStack.pop();
+        selectedAnnotation = null;
+        saveAnnotationsDebounced();
+        drawCanvas();
+        renderAnnotationList();
+    }
+
+    function deleteSelected() {
+        if (selectedAnnotation === null) return;
+        pushUndo();
+        annotations.splice(selectedAnnotation, 1);
+        selectedAnnotation = null;
+        saveAnnotationsDebounced();
+        drawCanvas();
+        renderAnnotationList();
+    }
+
+    function setTool(tool) {
+        currentTool = tool;
+        document.querySelectorAll('.tool-btn').forEach(function(b) { b.classList.toggle('active', b.dataset.tool === tool); });
+        canvas.style.cursor = tool === 'draw' ? 'crosshair' : 'default';
+    }
+
+    function updateCursor(e) {
+        if (currentTool !== 'select' || !img.src || !img.complete) return;
+        var rect = canvas.getBoundingClientRect();
+        var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+        var idx = findAnnotationAt(cx, cy);
+        canvas.style.cursor = idx >= 0 ? 'pointer' : 'default';
+    }
+
+    function renderAnnotationList() {
+        var container = document.getElementById('annotationList');
+        var countEl = document.getElementById('annotationCount');
+        var filterName = filterClassIdx !== null ? classes[filterClassIdx].name : null;
+        var visible = filterName ? annotations.filter(function(a) { return a.class === filterName; }) : annotations;
+        countEl.textContent = '(' + visible.length + (filterName ? '/' + annotations.length : '') + ')';
+        if (visible.length === 0) {
+            container.innerHTML = '<span style="font-size:11px;color:#94a3b8;">' + (filterName ? '无 ' + filterName + ' 标注' : '暂无标注') + '</span>';
+            return;
+        }
+        container.innerHTML = visible.map(function(a) {
+            var i = annotations.indexOf(a);
+            var sel = i === selectedAnnotation ? ' style="background:#EBF4FF;border-color:#3B82F6;"' : '';
+            return '<div class="annotation-item"' + sel + ' onclick="selectAnnotationInList(' + i + ')">' +
+                '<span class="color-dot" style="background:' + a.color + ';"></span>' +
+                '<span style="flex:1;font-size:11px;">' + a.class + '</span>' +
+                '<button onclick="event.stopPropagation();changeAnnotationClass(' + i + ')" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:11px;" title="换类别"><i class="fas fa-tag"></i></button>' +
+                '<button onclick="event.stopPropagation();deleteAnnotationItem(' + i + ')" style="background:none;border:none;color:#f56565;cursor:pointer;font-size:11px;"><i class="fas fa-trash"></i></button>' +
+                '</div>';
+        }).join('');
+    }
+
+    function selectAnnotationInList(idx) {
+        selectedAnnotation = idx;
+        drawCanvas();
+        renderAnnotationList();
+    }
+
+    function deleteAnnotationItem(idx) {
+        pushUndo();
+        annotations.splice(idx, 1);
+        if (selectedAnnotation === idx) selectedAnnotation = null;
+        saveAnnotationsDebounced();
+        drawCanvas();
+        renderAnnotationList();
+    }
+
+    async function changeAnnotationClass(idx) {
+        if (classes.length === 0) { showAlert('请先添加类别'); return; }
+        var html = classes.map(function(c, i) {
+            return '<div onclick="setAnnotationClass(' + idx + ',' + i + ')" style="cursor:pointer;padding:4px 8px;border-radius:4px;margin:2px 0;display:flex;align-items:center;gap:6px;">' +
+                '<span style="width:12px;height:12px;border-radius:2px;background:' + c.color + ';"></span>' + c.name + '</div>';
+        }).join('');
+        document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-tag"></i> <span>选择类别</span>';
+        document.getElementById('appModalBody').innerHTML = html;
+        document.getElementById('appModalFooter').innerHTML = '<button class="btn btn-secondary" id="modalPromptCancel" onclick="closeAppModal()">取消</button>';
+        document.getElementById('appModal').classList.add('active');
+        _modalResolve = function() {};
+    }
+
+    function setAnnotationClass(annIdx, classIdx) {
+        annotations[annIdx].class = classes[classIdx].name;
+        annotations[annIdx].color = classes[classIdx].color;
+        closeAppModal();
+        saveAnnotationsDebounced();
+        drawCanvas();
+        renderAnnotationList();
+    }
+
+    // ========== 类别管理 ==========
+    function loadClasses() {
+        fetch('/api/annotation/dataset/classes')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            classes = Array.isArray(data) ? data : [];
+            renderClassList();
+        }).catch(function(err) { console.error(err); });
+    }
+
+    function selectClassForDrawing(idx) {
+        selectedClassIdx = idx;
+        renderClassList();
+    }
+
+    function toggleClassFilter(idx) {
+        filterClassIdx = filterClassIdx === idx ? null : idx;
+        selectedClassIdx = idx;
+        renderClassList();
+        renderImageList();
+        renderAnnotationList();
+        drawCanvas();
+    }
+
+    function renderClassList() {
+        var container = document.getElementById('classList');
+        var statsEl = document.getElementById('classStats');
+        if (classes.length === 0) {
+            container.innerHTML = '<span style="font-size:11px;color:#94a3b8;">暂无类别</span>';
+            statsEl.textContent = '';
+            selectedClassIdx = null;
+            return;
+        }
+
+        container.innerHTML = classes.map(function(c, i) {
+            var isSel = i === selectedClassIdx;
+            var isFiltered = i === filterClassIdx;
+            var ic = c.image_count || 0;
+            var bc = c.box_count || 0;
+
+            var bg = '';
+            if (isFiltered) bg = 'background:' + c.color + '33;border-color:' + c.color + ';box-shadow:0 0 0 1px ' + c.color + ';';
+            else if (isSel) bg = 'background:' + c.color + '15;border-color:' + c.color + ';';
+
+            var num = (i < 9 ? (i + 1) : '0');
+            return '<span class="class-item" onclick="selectClassForDrawing(' + i + ')" ondblclick="toggleClassFilter(' + i + ')" style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border:1px solid #e2e8f0;border-radius:4px;font-size:11px;cursor:pointer;' + bg + '">' +
+                '<span style="width:10px;height:10px;border-radius:2px;background:' + c.color + ';flex-shrink:0;"></span>' +
+                '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + c.name + '</span>' +
+                '<span style="font-size:9px;color:#94a3b8;flex-shrink:0;">' + bc + '框/' + ic + '图</span>' +
+                '<span style="font-size:8px;color:#cbd5e0;flex-shrink:0;">' + num + '</span>' +
+                '<button onclick="event.stopPropagation();editClass(' + i + ')" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:10px;padding:0;flex-shrink:0;"><i class="fas fa-pen"></i></button>' +
+                '<button onclick="event.stopPropagation();deleteClass(' + i + ')" style="background:none;border:none;color:#f56565;cursor:pointer;font-size:10px;padding:0;flex-shrink:0;"><i class="fas fa-trash"></i></button>' +
+                '</span>';
+        }).join('');
+
+        statsEl.textContent = '';
+    }
+
+    async function addClass() {
+        var name = await showPrompt('输入类别名称：');
+        if (!name) return;
+        var color = COLORS[classes.length % COLORS.length];
+        classes.push({name: name, color: color});
+        saveClassesRemote();
+        renderClassList();
+    }
+
+    async function editClass(idx) {
+        var newName = await showPrompt('编辑类别名称：', classes[idx].name);
+        if (!newName) return;
+        var oldName = classes[idx].name;
+        classes[idx].name = newName;
+        annotations.forEach(function(a) { if (a.class === oldName) a.class = newName; });
+        saveClassesRemote();
+        saveAnnotationsDebounced();
+        renderClassList();
+    }
+
+    async function deleteClass(idx) {
+        var ok = await showConfirm('删除类别 <b>' + classes[idx].name + '</b> 吗？');
+        if (!ok) return;
+        classes.splice(idx, 1);
+        saveClassesRemote();
+        renderClassList();
+    }
+
+    function saveClassesRemote() {
+        fetch('/api/annotation/dataset/classes', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify(classes)
+        }).catch(function(err) { console.error(err); });
+    }
+
+    var selectedClassIdx = null;
+    var filterClassIdx = null;
+    var selectedImages = {};       // {filename: true} 多选
+
+    // ========== 快捷键 ==========
+    document.addEventListener('keydown', function(e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+        // 上下键切换图片
+        if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && images.length > 0) {
+            e.preventDefault();
+            var idx = -1;
+            for (var i = 0; i < images.length; i++) {
+                if (images[i].name === currentImage) { idx = i; break; }
+            }
+            if (e.key === 'ArrowUp') idx = idx <= 0 ? images.length - 1 : idx - 1;
+            else idx = idx >= images.length - 1 ? 0 : idx + 1;
+            selectImage(images[idx].name);
+            return;
+        }
+
+        // 数字键选类别 (1-9, 0)
+        if (e.key >= '0' && e.key <= '9') {
+            var ci = e.key === '0' ? 9 : parseInt(e.key) - 1;
+            if (ci < classes.length) {
+                e.preventDefault();
+                selectClassForDrawing(ci);
+            }
+        }
+
+        if (e.key === 'r' || e.key === 'R') setTool('draw');
+        if (e.key === 'v' || e.key === 'V') setTool('select');
+        if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAnnotation !== null) deleteSelected();
+        if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undoAnnotation(); }
+    });
+
+    window.addEventListener('resize', function() {
+        if (img.src && img.complete) {
+            canvas.width = document.getElementById('canvasContainer').clientWidth;
+            canvas.height = document.getElementById('canvasContainer').clientHeight;
+            zoomFit();
+        }
+    });
+
+    // ========== 模型推理 ==========
+    function loadInferenceModels() {
+        fetch('/api/annotation/inference-models')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.success) return;
+            var sel = document.getElementById('inferenceModel');
+            sel.innerHTML = '<option value="">-- 选择模型 --</option>';
+            data.models.forEach(function(m) {
+                sel.innerHTML += '<option value="' + m.task_id + '">' + m.display_name + ' (' + m.size_mb + 'MB)</option>';
+            });
+            document.getElementById('inferenceModel').onchange = function() {
+                document.getElementById('inferenceBtn').disabled = Object.keys(selectedImages).length === 0 || !this.value;
+            };
+        }).catch(function(err) { console.error(err); });
+    }
+
+    function runInference() {
+        var taskId = document.getElementById('inferenceModel').value;
+        var conf = parseFloat(document.getElementById('inferenceConf').value);
+        var imgNames = Object.keys(selectedImages);
+        if (!taskId || imgNames.length === 0) { showAlert('请选择模型和图片'); return; }
+
+        var btn = document.getElementById('inferenceBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 推理中...';
+
+        fetch('/api/annotation/inference', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_id: taskId, images: imgNames, conf: conf})
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-magic"></i> 推理标注';
+            if (data.success) {
+                showAlert(data.message, '推理完成');
+                selectedImages = {};
+                updateSelectedCount();
+                loadImages();
+                loadClasses();
+                if (currentImage) { loadAnnotations(currentImage); drawCanvas(); renderAnnotationList(); }
+                renderImageList();
+            } else {
+                showAlert(data.error, '推理失败');
+            }
+        }).catch(function(err) {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-magic"></i> 推理标注';
+            showAlert(err.message, '推理失败');
+        });
+    }
+
+    // ========== 初始化 ==========
+    document.addEventListener('DOMContentLoaded', function() {
+        refreshDatasets();
+        loadInferenceModels();
+    });
+</script>
+{% endblock %}

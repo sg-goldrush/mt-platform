@@ -11,8 +11,10 @@ import threading
 import logging
 import uuid
 import time
+import hashlib
+import shutil
 from urllib.parse import urlparse
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, session, g
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from PIL import Image
@@ -22,9 +24,49 @@ app = Flask(__name__)
 CORS(app)
 
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['SECRET_KEY'] = 'mt-platform-secret-key-2024'
 
 # 应用版本号
 APP_VERSION = "v3.0"
+
+# 全局存储上限 (GB)
+MAX_TOTAL_STORAGE_GB = 200
+
+# 系统磁盘最少保留空间 (GB)
+MIN_SYSTEM_DISK_FREE_GB = 50
+
+def _get_total_project_size_gb():
+    """计算整个项目目录的总大小 (GB)，包括 uploads/, runs/, logs/, tmp/"""
+    total = 0
+    for folder in ['uploads', 'runs', 'logs', 'tmp']:
+        p = os.path.join(os.getcwd(), folder)
+        total += _dir_size(p)
+    return round(total / 1073741824, 2)
+
+def _check_storage_quota():
+    """检查存储配额，返回 (ok: bool, used_gb: float, max_gb: float, reason: str)
+    同时检查：1) 项目存储是否超 200GB  2) 系统磁盘剩余是否不足 50GB
+    管理员可通过 config.json 关闭配额检查"""
+    used = _get_total_project_size_gb()
+
+    # 配额开关关闭时，始终放行
+    if not _is_quota_enabled():
+        return True, used, MAX_TOTAL_STORAGE_GB, ''
+
+    # 检查项目存储上限
+    if used >= MAX_TOTAL_STORAGE_GB:
+        return False, used, MAX_TOTAL_STORAGE_GB, f'项目存储已达上限 ({used}GB / {MAX_TOTAL_STORAGE_GB}GB)'
+
+    # 检查系统磁盘剩余空间
+    try:
+        disk = shutil.disk_usage(os.getcwd())
+        disk_free_gb = disk.free / 1073741824
+        if disk_free_gb < MIN_SYSTEM_DISK_FREE_GB:
+            return False, used, MAX_TOTAL_STORAGE_GB, f'服务器磁盘剩余不足 ({disk_free_gb:.1f}GB / {MIN_SYSTEM_DISK_FREE_GB}GB)，已暂停写入操作'
+    except Exception:
+        pass  # 获取磁盘信息失败时不阻塞
+
+    return True, used, MAX_TOTAL_STORAGE_GB, ''
 
 # 配置SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -280,39 +322,520 @@ class VideoAnnotationTask:
 BASE_PATH = os.getcwd()
 UPLOAD_FOLDER = os.path.join(BASE_PATH, 'uploads', 'samples')
 STATIC_FOLDER = os.path.join(BASE_PATH, 'static')
-ANNOTATIONS_FOLDER = os.path.join(BASE_PATH, 'uploads', 'annotations')
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['STATIC_FOLDER'] = STATIC_FOLDER
-app.config['ANNOTATIONS_FOLDER'] = ANNOTATIONS_FOLDER
 
+# 确保基础目录存在
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(STATIC_FOLDER, exist_ok=True)
-os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
 
-# 模拟数据库存储标注信息
-ANNOTATIONS_FILE = os.path.join(ANNOTATIONS_FOLDER, 'annotations.json')
-CLASSES_FILE = os.path.join(ANNOTATIONS_FOLDER, 'classes.json')
 
-# 初始化注释文件
-if not os.path.exists(ANNOTATIONS_FILE):
-    with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
-        json.dump({}, f)
-        
-# 初始化类别文件
-if not os.path.exists(CLASSES_FILE):
-    # 默认类别
-    default_classes = [
-        {'name': 'person', 'color': '#3aa757'}
-    ]
-    with open(CLASSES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(default_classes, f)
+# ============================================================
+# 用户管理 & 鉴权系统
+# ============================================================
+
+USERS_FILE = os.path.join(BASE_PATH, 'users.json')
+
+
+def _load_users():
+    """加载用户数据"""
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, Exception):
+        return {}
+
+
+def _save_users(users):
+    """保存用户数据"""
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, indent=2, ensure_ascii=False)
+
+
+def _hash_password(password):
+    """密码存储 (明文，管理员可查看)"""
+    return password  # 内部工具，明文存储，方便管理员查看
+
+
+def _init_users():
+    """初始化用户文件，创建/修复默认管理员"""
+    users = _load_users()
+    need_save = False
+
+    if 'admin' not in users:
+        users['admin'] = {'password': 'admin123', 'is_admin': True}
+        need_save = True
+    else:
+        # 始终确保 admin 密码正确（兼容旧哈希格式）
+        users['admin']['password'] = 'admin123'
+        users['admin']['is_admin'] = True
+        need_save = True
+
+    if need_save:
+        _save_users(users)
+
+
+def get_current_user():
+    """获取当前登录用户，未登录返回 None"""
+    return session.get('username')
+
+
+def is_admin():
+    """当前用户是否为管理员"""
+    username = get_current_user()
+    if not username:
+        return False
+    users = _load_users()
+    return users.get(username, {}).get('is_admin', False)
+
+
+def get_user_data_dir(sub_path=''):
+    """获取当前用户的数据目录，自动创建"""
+    username = get_current_user() or '_default'
+    base = os.path.join(BASE_PATH, 'uploads', username)
+    if sub_path:
+        base = os.path.join(base, sub_path)
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def get_user_annotations_file():
+    """获取当前用户的标注文件路径"""
+    user_dir = get_user_data_dir('annotations')
+    return os.path.join(user_dir, 'annotations.json')
+
+
+def get_user_classes_file():
+    """获取当前用户的类别文件路径"""
+    user_dir = get_user_data_dir('annotations')
+    return os.path.join(user_dir, 'classes.json')
+
+
+def get_user_runs_dir():
+    """获取当前用户的训练输出目录"""
+    username = get_current_user() or '_default'
+    base = os.path.join(BASE_PATH, 'runs', username, 'train')
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def get_user_logs_dir():
+    """获取当前用户的日志目录"""
+    username = get_current_user() or '_default'
+    base = os.path.join(BASE_PATH, 'logs', username)
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+# 初始化默认用户
+_init_users()
+
+
+# ---- 鉴权 API ----
+
+@app.route('/api/auth/status')
+def auth_status():
+    """获取当前登录状态"""
+    username = get_current_user()
+    return jsonify({
+        'logged_in': username is not None,
+        'username': username,
+        'is_admin': is_admin()
+    })
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def auth_login():
+    """用户登录"""
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password', '')
+
+    if not username or not password:
+        return jsonify({'success': False, 'error': '用户名和密码不能为空'}), 400
+
+    users = _load_users()
+    user = users.get(username)
+
+    if not user:
+        return jsonify({'success': False, 'error': '用户不存在'}), 401
+
+    if user.get('password') != _hash_password(password):
+        return jsonify({'success': False, 'error': '密码错误'}), 401
+
+    # 检查账号是否处于暂停/待删除状态
+    deleted_at = user.get('deleted_at')
+    if deleted_at:
+        return jsonify({'success': False, 'error': '该账号已被暂停，请联系管理员恢复'}), 403
+
+    session['username'] = username
+    session.permanent = True
+
+    return jsonify({
+        'success': True,
+        'username': username,
+        'is_admin': user.get('is_admin', False)
+    })
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def auth_logout():
+    """用户登出"""
+    session.pop('username', None)
+    return jsonify({'success': True})
+
+
+@app.route('/api/auth/register', methods=['POST'])
+def auth_register():
+    """用户注册 — 已停用，仅管理员可创建"""
+    return jsonify({'success': False, 'error': '不允许自行注册，请联系管理员创建账号'}), 403
+
+
+# ---- 平台配置（持久化） ----
+
+CONFIG_FILE = os.path.join(BASE_PATH, 'config.json')
+
+def _load_config():
+    """加载平台配置"""
+    if not os.path.exists(CONFIG_FILE):
+        return {'quota_enabled': True}
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {'quota_enabled': True}
+
+def _save_config(cfg):
+    """保存平台配置"""
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+def _is_quota_enabled():
+    """配额检查是否已启用"""
+    return _load_config().get('quota_enabled', True)
+
+
+# ---- 管理员 API ----
+
+def _require_admin():
+    """检查当前请求是否为管理员，否则返回 403"""
+    if not is_admin():
+        return jsonify({'success': False, 'error': '需要管理员权限'}), 403
+    return None
+
+
+def _cleanup_expired_users():
+    """清理暂停超过7天的用户及其数据"""
+    users = _load_users()
+    now = time.time()
+    removed = []
+
+    for name, info in list(users.items()):
+        deleted_at = info.get('deleted_at')
+        if deleted_at:
+            try:
+                # deleted_at 格式: '2026-07-18 21:00:00'
+                ts = time.mktime(time.strptime(deleted_at, '%Y-%m-%d %H:%M:%S'))
+                if now >= ts:
+                    del users[name]
+                    removed.append(name)
+                    # 删除用户数据
+                    for folder in ['uploads', 'runs', 'logs']:
+                        p = os.path.join(BASE_PATH, folder, name)
+                        if os.path.exists(p):
+                            shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+
+    if removed:
+        _save_users(users)
+    return removed
+
+
+@app.route('/api/admin/users')
+def admin_list_users():
+    """管理员：获取所有用户列表"""
+    err = _require_admin()
+    if err: return err
+
+    _cleanup_expired_users()  # 自动清理到期用户
+    users = _load_users()
+
+    user_list = []
+    for name, info in users.items():
+        deleted_at = info.get('deleted_at', '')
+        # 计算状态
+        if deleted_at:
+            status = 'paused'
+            try:
+                ts = time.mktime(time.strptime(deleted_at, '%Y-%m-%d %H:%M:%S'))
+                remaining = max(0, int((ts - time.time()) / 86400))
+            except Exception:
+                remaining = 0
+        else:
+            status = 'active'
+            remaining = 0
+
+        user_list.append({
+            'username': name,
+            'password': info.get('password', ''),
+            'is_admin': info.get('is_admin', False),
+            'created_at': info.get('created_at', ''),
+            'status': status,
+            'deleted_at': deleted_at,
+            'remaining_days': remaining
+        })
+    return jsonify({'success': True, 'users': user_list})
+
+
+@app.route('/api/admin/create-user', methods=['POST'])
+def admin_create_user():
+    """管理员：创建新用户"""
+    err = _require_admin()
+    if err: return err
+
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password', '')
+
+    if not username or not password:
+        return jsonify({'success': False, 'error': '用户名和密码不能为空'}), 400
+
+    if len(username) < 2:
+        return jsonify({'success': False, 'error': '用户名至少2个字符'}), 400
+
+    if len(password) < 4 or len(password) > 18:
+        return jsonify({'success': False, 'error': '密码长度需在4-18位之间'}), 400
+
+    if not username.isalnum():
+        return jsonify({'success': False, 'error': '用户名只能包含字母和数字'}), 400
+
+    users = _load_users()
+    if username in users:
+        return jsonify({'success': False, 'error': '用户名已存在'}), 409
+
+    users[username] = {
+        'password': _hash_password(password),
+        'is_admin': False,
+        'created_at': time.strftime('%Y-%m-%d %H:%M:%S')
+    }
+    _save_users(users)
+
+    return jsonify({'success': True, 'username': username, 'message': f'用户 {username} 创建成功'})
+
+
+@app.route('/api/admin/reset-password', methods=['POST'])
+def admin_reset_password():
+    """管理员：重置用户密码"""
+    err = _require_admin()
+    if err: return err
+
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+    password = (data.get('password') or '').strip()
+
+    if not username or not password:
+        return jsonify({'success': False, 'error': '用户名和密码不能为空'}), 400
+
+    if len(password) < 4 or len(password) > 18:
+        return jsonify({'success': False, 'error': '密码长度需在4-18位之间'}), 400
+
+    users = _load_users()
+    if username not in users:
+        return jsonify({'success': False, 'error': '用户不存在'}), 404
+
+    users[username]['password'] = _hash_password(password)
+    _save_users(users)
+
+    return jsonify({'success': True, 'message': f'用户 {username} 密码已重置'})
+
+
+@app.route('/api/admin/delete-user', methods=['POST'])
+def admin_delete_user():
+    """管理员：暂停用户(7天后自动删除)"""
+    err = _require_admin()
+    if err: return err
+
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+
+    if not username:
+        return jsonify({'success': False, 'error': '用户名不能为空'}), 400
+
+    if username == 'admin':
+        return jsonify({'success': False, 'error': '不能删除管理员账号'}), 400
+
+    users = _load_users()
+    if username not in users:
+        return jsonify({'success': False, 'error': '用户不存在'}), 404
+
+    if users[username].get('deleted_at'):
+        return jsonify({'success': False, 'error': '该用户已在暂停状态'}), 400
+
+    # 设为7天后自动删除
+    expire_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + 7 * 86400))
+    users[username]['deleted_at'] = expire_time
+    _save_users(users)
+
+    # 清除该用户的 session（如果在线）
+    # （简单处理：不影响已登录 session，下次登录时会被拦截）
+
+    return jsonify({'success': True, 'message': f'用户 {username} 已暂停，将于 {expire_time} 自动删除', 'deleted_at': expire_time})
+
+
+@app.route('/api/admin/restore-user', methods=['POST'])
+def admin_restore_user():
+    """管理员：恢复已暂停的用户"""
+    err = _require_admin()
+    if err: return err
+
+    data = request.json or {}
+    username = (data.get('username') or '').strip()
+
+    if not username:
+        return jsonify({'success': False, 'error': '用户名不能为空'}), 400
+
+    users = _load_users()
+    if username not in users:
+        return jsonify({'success': False, 'error': '用户不存在'}), 404
+
+    if not users[username].get('deleted_at'):
+        return jsonify({'success': False, 'error': '该用户不在暂停状态'}), 400
+
+    del users[username]['deleted_at']
+    _save_users(users)
+
+    return jsonify({'success': True, 'message': f'用户 {username} 已恢复'})
+
+
+@app.route('/api/admin/system-info')
+def admin_system_info():
+    """管理员：获取服务器系统资源信息"""
+    err = _require_admin()
+    if err: return err
+
+    import psutil
+
+    # CPU
+    cpu_percent = psutil.cpu_percent(interval=0.5)
+    cpu_count = psutil.cpu_count()
+
+    # 内存
+    mem = psutil.virtual_memory()
+    mem_total_gb = round(mem.total / 1073741824, 1)
+    mem_used_gb = round(mem.used / 1073741824, 1)
+    mem_percent = mem.percent
+
+    # 磁盘
+    disk = shutil.disk_usage(os.getcwd())
+    disk_total_gb = round(disk.total / 1073741824, 1)
+    disk_used_gb = round(disk.used / 1073741824, 1)
+    disk_free_gb = round(disk.free / 1073741824, 1)
+    disk_percent = round(disk.used / disk.total * 100, 1)
+
+    # 项目存储
+    project_used_gb = _get_total_project_size_gb()
+    project_percent = round(project_used_gb / MAX_TOTAL_STORAGE_GB * 100, 1)
+
+    return jsonify({
+        'success': True,
+        'cpu': {'percent': cpu_percent, 'count': cpu_count},
+        'memory': {'total_gb': mem_total_gb, 'used_gb': mem_used_gb, 'percent': mem_percent},
+        'disk': {'total_gb': disk_total_gb, 'used_gb': disk_used_gb, 'free_gb': disk_free_gb, 'percent': disk_percent},
+        'project_storage': {'used_gb': project_used_gb, 'max_gb': MAX_TOTAL_STORAGE_GB, 'percent': project_percent}
+    })
+
+
+@app.route('/api/admin/storage-check')
+def admin_storage_check():
+    """检查存储配额状态"""
+    ok, used_gb, max_gb, reason = _check_storage_quota()
+    return jsonify({
+        'success': True,
+        'ok': ok,
+        'used_gb': used_gb,
+        'max_gb': max_gb,
+        'percent': round(used_gb / max_gb * 100, 1),
+        'reason': reason,
+        'quota_enabled': _is_quota_enabled()
+    })
+
+
+# ---- 配额开关 (管理员) ----
+
+@app.route('/api/admin/quota-config')
+def admin_quota_config():
+    """获取配额开关状态"""
+    err = _require_admin()
+    if err: return err
+    return jsonify({'success': True, 'quota_enabled': _is_quota_enabled()})
+
+
+@app.route('/api/admin/toggle-quota', methods=['POST'])
+def admin_toggle_quota():
+    """切换配额开关"""
+    err = _require_admin()
+    if err: return err
+    data = request.json or {}
+    enabled = data.get('enabled', True)
+    cfg = _load_config()
+    cfg['quota_enabled'] = bool(enabled)
+    _save_config(cfg)
+    return jsonify({'success': True, 'quota_enabled': cfg['quota_enabled']})
+
+
+# ---- 存储配额检查 API (所有用户可访问) ----
+
+@app.route('/api/storage/quota')
+def storage_quota():
+    """获取存储配额状态"""
+    ok, used_gb, max_gb, reason = _check_storage_quota()
+    return jsonify({
+        'success': True,
+        'ok': ok,
+        'used_gb': used_gb,
+        'max_gb': max_gb,
+        'percent': round(used_gb / max_gb * 100, 1),
+        'quota_exceeded': not ok,
+        'reason': reason,
+        'quota_enabled': _is_quota_enabled()
+    })
+
+
+# ---- 需要鉴权的 API 装饰器 ----
+
+def require_auth(f):
+    """装饰器：要求登录才能访问"""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not get_current_user():
+            return jsonify({'success': False, 'error': '请先登录', 'require_auth': True}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 
 @app.route('/')
 def index():
     """主页 — 模型训练"""
     return render_template('training.html', version=APP_VERSION)
+
+
+@app.route('/dashboard')
+def dashboard():
+    """看板页面 — 管理员专用"""
+    if not is_admin():
+        return 'Access Denied', 403
+    return render_template('dashboard.html', version=APP_VERSION)
+
+
+@app.route('/annotate')
+def annotate():
+    """标注页面"""
+    return render_template('annotation.html', version=APP_VERSION)
+
 
 @app.route('/api/files')
 def get_files():
@@ -420,37 +943,984 @@ def get_files():
         'files': files
     })
 
+# ============================================================
+# 数据集管理 & 标注（数据集驱动）
+# ============================================================
+
+ACTIVE_DATASET_FILE = os.path.join(BASE_PATH, 'uploads', 'config', 'active_datasets.json')
+
+
+def _load_active_datasets():
+    """加载各用户当前活跃的数据集"""
+    if not os.path.exists(ACTIVE_DATASET_FILE):
+        return {}
+    try:
+        with open(ACTIVE_DATASET_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_active_datasets(data):
+    os.makedirs(os.path.dirname(ACTIVE_DATASET_FILE), exist_ok=True)
+    with open(ACTIVE_DATASET_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _get_active_dataset():
+    """获取当前用户活跃的数据集名称"""
+    username = get_current_user() or '_default'
+    return _load_active_datasets().get(username, '')
+
+
+def _get_dataset_dir(dataset_name):
+    """获取数据集目录"""
+    username = get_current_user() or '_default'
+    return os.path.join(BASE_PATH, 'uploads', username, 'training_datasets', dataset_name)
+
+
+VALID_IMG_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')
+
+def _is_valid_image(filename):
+    """是否为有效图片文件（排除 macOS 资源文件）"""
+    if not filename or filename.startswith('.') or filename.startswith('._'):
+        return False
+    return filename.lower().endswith(VALID_IMG_EXTS)
+
+
+def _get_dataset_images_dir(dataset_name):
+    return os.path.join(_get_dataset_dir(dataset_name), 'images')
+
+
+def _get_dataset_labels_dir(dataset_name):
+    return os.path.join(_get_dataset_dir(dataset_name), 'labels')
+
+
+# ---- 活跃数据集 API ----
+
+@app.route('/api/annotation/dataset/active')
+def get_active_dataset():
+    """获取当前活跃数据集名"""
+    return jsonify({'success': True, 'dataset': _get_active_dataset()})
+
+
+@app.route('/api/annotation/dataset/set-active', methods=['POST'])
+def set_active_dataset():
+    """设置活跃数据集"""
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+
+    username = get_current_user() or '_default'
+    datasets = _load_active_datasets()
+
+    if name:
+        # 验证数据集存在
+        ds_dir = _get_dataset_dir(name)
+        if not os.path.isdir(ds_dir):
+            return jsonify({'success': False, 'error': '数据集不存在'}), 404
+        datasets[username] = name
+    else:
+        datasets.pop(username, None)
+
+    _save_active_datasets(datasets)
+    return jsonify({'success': True, 'dataset': name or ''})
+
+
+# ---- 数据集上传 (ZIP only, max 2GB) ----
+
+@app.route('/api/annotation/dataset/upload', methods=['POST'])
+@require_auth
+def upload_dataset_zip():
+    """上传数据集 ZIP → 创建/追加到数据集"""
+    try:
+        ok, used, max_gb, reason = _check_storage_quota()
+        if not ok:
+            return jsonify({'success': False, 'error': reason, 'quota_exceeded': True}), 413
+
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': '未选择文件'}), 400
+
+        file = request.files['file']
+        if not file.filename or not file.filename.lower().endswith('.zip'):
+            return jsonify({'success': False, 'error': '仅支持 ZIP 格式'}), 400
+
+        # 检查文件大小 (2GB)
+        file.seek(0, 2)
+        size = file.tell()
+        file.seek(0)
+        if size > 2 * 1024 * 1024 * 1024:
+            return jsonify({'success': False, 'error': 'ZIP 文件不能超过 2GB'}), 413
+
+        import zipfile
+
+        # 数据集名 = ZIP 文件名 (不含扩展名)
+        ds_name = os.path.splitext(file.filename)[0]
+        ds_name = ''.join(c for c in ds_name if c.isalnum() or c in '-_ .').strip()
+        if not ds_name:
+            ds_name = 'dataset_' + time.strftime('%Y%m%d%H%M%S')
+
+        images_dir = _get_dataset_images_dir(ds_name)
+        labels_dir = _get_dataset_labels_dir(ds_name)
+        os.makedirs(images_dir, exist_ok=True)
+        os.makedirs(labels_dir, exist_ok=True)
+
+        count = 0
+        with zipfile.ZipFile(file) as zf:
+            entries = zf.namelist()
+
+            # 检测是否有单一顶层目录（如 archive/xxx），自动平铺
+            prefix = ''
+            top_dirs = set()
+            for e in entries:
+                parts = e.split('/')
+                if parts[0] and not parts[0].startswith('.') and parts[0] != '__MACOSX':
+                    top_dirs.add(parts[0])
+            if len(top_dirs) == 1:
+                prefix = list(top_dirs)[0] + '/'
+
+            for entry in entries:
+                # 跳过目录
+                if entry.endswith('/'):
+                    continue
+                # 剥掉前缀
+                rel = entry[len(prefix):] if prefix else entry
+                fname = os.path.basename(rel)
+                # 跳过隐藏文件和 macOS 资源
+                if not fname or fname.startswith('.') or fname.startswith('._') or '__MACOSX' in entry.split('/'):
+                    continue
+
+                # data.yaml 提取到数据集根目录，并修正路径为扁平结构
+                if fname == 'data.yaml' or fname == 'data.yml':
+                    target = os.path.join(_get_dataset_dir(ds_name), fname)
+                    with zf.open(entry) as src:
+                        content = src.read()
+                    # 用扁平结构覆盖路径
+                    try:
+                        import yaml
+                        cfg = yaml.safe_load(content) or {}
+                    except Exception:
+                        cfg = {}
+                    cfg['path'] = '.'
+                    cfg['train'] = 'images'
+                    cfg['val'] = 'images'
+                    cfg['test'] = 'images'
+                    with open(target, 'w', encoding='utf-8') as dst:
+                        yaml.dump(cfg, dst, default_flow_style=False, allow_unicode=True)
+                    continue
+
+                if _is_valid_image(fname):
+                    target = os.path.join(images_dir, fname)
+                    if os.path.exists(target):
+                        base, ext = os.path.splitext(fname)
+                        target = os.path.join(images_dir, base + '_' + str(uuid.uuid4())[:6] + ext)
+                    with zf.open(entry) as src:
+                        with open(target, 'wb') as dst:
+                            dst.write(src.read())
+                    count += 1
+                elif fname.endswith('.txt') and not fname.startswith('.') and not fname.startswith('._') and fname != 'labels.cache':
+                    # 提取标注文件到 labels/
+                    target = os.path.join(labels_dir, fname)
+                    with zf.open(entry) as src:
+                        with open(target, 'wb') as dst:
+                            dst.write(src.read())
+
+        if count == 0:
+            return jsonify({'success': False, 'error': 'ZIP 中未找到图片文件，请确认 ZIP 内包含 jpg/png 等格式图片'}), 400
+
+        # 设为活跃数据集
+        username = get_current_user() or '_default'
+        datasets = _load_active_datasets()
+        datasets[username] = ds_name
+        _save_active_datasets(datasets)
+
+        return jsonify({
+            'success': True,
+            'dataset': ds_name,
+            'image_count': count,
+            'message': f'数据集 {ds_name} 创建成功，{count} 张图片'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---- 往数据集追加图片 ----
+
+@app.route('/api/annotation/dataset/add-images', methods=['POST'])
+@require_auth
+def add_images_to_dataset():
+    """追加图片到活跃数据集 (支持单张图片或 ZIP)"""
+    try:
+        ok, used, max_gb, reason = _check_storage_quota()
+        if not ok:
+            return jsonify({'success': False, 'error': reason, 'quota_exceeded': True}), 413
+
+        ds_name = _get_active_dataset()
+        if not ds_name:
+            return jsonify({'success': False, 'error': '请先上传或选择一个数据集'}), 400
+
+        images_dir = _get_dataset_images_dir(ds_name)
+        os.makedirs(images_dir, exist_ok=True)
+
+        added = 0
+
+        # 处理上传的图片文件
+        if 'images' in request.files:
+            image_files = request.files.getlist('images')
+            for f in image_files:
+                if f.filename and f.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp')):
+                    fname = os.path.basename(f.filename)
+                    target = os.path.join(images_dir, fname)
+                    if os.path.exists(target):
+                        base, ext = os.path.splitext(fname)
+                        target = os.path.join(images_dir, base + '_' + str(uuid.uuid4())[:6] + ext)
+                    f.save(target)
+                    added += 1
+
+        # 处理 ZIP 文件
+        if 'zip' in request.files:
+            import zipfile
+            zf = request.files['zip']
+            if zf.filename and zf.filename.lower().endswith('.zip'):
+                with zipfile.ZipFile(zf) as z:
+                    zentries = z.namelist()
+                    # 自动检测嵌套前缀
+                    zprefix = ''
+                    ztop = set()
+                    for e in zentries:
+                        parts = e.split('/')
+                        if parts[0] and not parts[0].startswith('.') and parts[0] != '__MACOSX':
+                            ztop.add(parts[0])
+                    if len(ztop) == 1:
+                        zprefix = list(ztop)[0] + '/'
+
+                    for entry in zentries:
+                        if entry.endswith('/'):
+                            continue
+                        rel = entry[len(zprefix):] if zprefix else entry
+                        fname = os.path.basename(rel)
+                        if not fname or fname.startswith('.') or fname.startswith('._') or '__MACOSX' in entry.split('/'):
+                            continue
+
+                        if _is_valid_image(fname):
+                            target = os.path.join(images_dir, fname)
+                            if os.path.exists(target):
+                                base, ext = os.path.splitext(fname)
+                                target = os.path.join(images_dir, base + '_' + str(uuid.uuid4())[:6] + ext)
+                            with z.open(entry) as src:
+                                with open(target, 'wb') as dst:
+                                    dst.write(src.read())
+                            added += 1
+                        elif fname.endswith('.txt') and not fname.startswith('._') and fname != 'labels.cache':
+                            target = os.path.join(labels_dir, fname)
+                            with z.open(entry) as src:
+                                with open(target, 'wb') as dst:
+                                    dst.write(src.read())
+
+        if added == 0:
+            return jsonify({'success': False, 'error': '未找到有效的图片文件'}), 400
+
+        return jsonify({'success': True, 'added': added, 'message': f'已追加 {added} 张图片到数据集 {ds_name}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---- 数据集图片列表 ----
+
+@app.route('/api/annotation/dataset/images')
+def get_dataset_images():
+    """获取活跃数据集的图片列表"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': True, 'dataset': '', 'images': []})
+
+    images_dir = _get_dataset_images_dir(ds_name)
+    labels_dir = _get_dataset_labels_dir(ds_name)
+    ds_dir = _get_dataset_dir(ds_name)
+
+    image_list = []
+
+    def _scan_images(search_dir):
+        """扫描目录中的图片，返回 [(full_path, filename)]"""
+        result = []
+        if os.path.isdir(search_dir):
+            for fname in sorted(os.listdir(search_dir)):
+                if _is_valid_image(fname):
+                    result.append((os.path.join(search_dir, fname), fname))
+        return result
+
+    # 先从 images/ 目录加载
+    found = _scan_images(images_dir)
+
+    # 如果 images/ 为空，递归扫描整个数据集目录（兼容旧格式）
+    if not found:
+        for root, dirs, files in os.walk(ds_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__MACOSX']
+            for fname in sorted(files):
+                if _is_valid_image(fname):
+                    found.append((os.path.join(root, fname), fname))
+
+    for path, fname in found:
+        label_name = os.path.splitext(fname)[0] + '.txt'
+        label_path = os.path.join(labels_dir, label_name)
+        # 如果 labels/ 下没有，递归搜索
+        if not os.path.exists(label_path):
+            for root, dirs, files in os.walk(ds_dir):
+                if label_name in files:
+                    label_path = os.path.join(root, label_name)
+                    break
+
+        class_ids = []
+        if os.path.exists(label_path):
+            try:
+                with open(label_path, 'r') as lf:
+                    for line in lf:
+                        parts = line.strip().split()
+                        if parts:
+                            class_ids.append(int(parts[0]))
+            except Exception:
+                pass
+
+        try:
+            with Image.open(path) as img:
+                w, h = img.size
+        except Exception:
+            w, h = 0, 0
+
+        image_list.append({
+            'name': fname,
+            'width': w, 'height': h,
+            'annotation_count': len(class_ids),
+            'class_ids': list(set(class_ids))
+        })
+
+    return jsonify({'success': True, 'dataset': ds_name, 'images': image_list})
+
+
+# ---- 数据集图片访问 ----
+
+@app.route('/api/annotation/dataset/image/<filename>')
+def serve_dataset_image(filename):
+    """提供数据集中的图片"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'error': 'No active dataset'}), 400
+
+    images_dir = _get_dataset_images_dir(ds_name)
+    path = os.path.join(images_dir, filename)
+
+    # 如果 images/ 下没有，递归搜索整个数据集目录
+    if not os.path.exists(path):
+        ds_dir = _get_dataset_dir(ds_name)
+        for root, dirs, files in os.walk(ds_dir):
+            if filename in files:
+                return send_from_directory(root, filename)
+
+    return send_from_directory(images_dir, filename)
+
+
+# ---- 数据集标注 (YOLO 格式) ----
+
+@app.route('/api/annotation/dataset/annotations/<image_name>', methods=['GET'])
+def get_dataset_annotations(image_name):
+    """获取图片的 YOLO 标注"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify([])
+
+    labels_dir = _get_dataset_labels_dir(ds_name)
+    ds_dir = _get_dataset_dir(ds_name)
+    label_name = os.path.splitext(image_name)[0] + '.txt'
+    label_path = os.path.join(labels_dir, label_name)
+
+    # 如果 labels/ 下没有，递归搜索
+    if not os.path.exists(label_path):
+        for root, dirs, files in os.walk(ds_dir):
+            if label_name in files:
+                label_path = os.path.join(root, label_name)
+                break
+
+    # 加载类别
+    classes = _load_dataset_classes(ds_name)
+
+    # 缓存图片尺寸
+    images_dir = _get_dataset_images_dir(ds_name)
+    img_path = os.path.join(images_dir, image_name)
+    try:
+        with Image.open(img_path) as img:
+            iw, ih = img.size
+    except Exception:
+        iw, ih = 640, 640
+
+    annotations = []
+    if os.path.exists(label_path):
+        with open(label_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 5:
+                    continue
+
+                cls_id = int(parts[0])
+                coords = list(map(float, parts[1:]))
+                cls_name = classes[cls_id]['name'] if cls_id < len(classes) else 'unknown'
+                color = classes[cls_id]['color'] if cls_id < len(classes) else '#3B82F6'
+
+                if len(coords) >= 8:
+                    # OBB 格式: x1 y1 x2 y2 x3 y3 x4 y4 (归一化)
+                    xs = [coords[i] * iw for i in range(0, len(coords), 2)]
+                    ys = [coords[i] * ih for i in range(1, len(coords), 2)]
+                    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                elif len(coords) == 4:
+                    # 标准检测格式: cx cy w h (归一化)
+                    cx, cy, w_norm, h_norm = coords
+                    x1 = (cx - w_norm / 2) * iw
+                    y1 = (cy - h_norm / 2) * ih
+                    x2 = (cx + w_norm / 2) * iw
+                    y2 = (cy + h_norm / 2) * ih
+                else:
+                    continue
+
+                annotations.append({
+                    'id': 'ann_' + str(uuid.uuid4())[:8],
+                    'class': cls_name,
+                    'color': color,
+                    'type': 'rectangle',
+                    'points': [
+                        {'x': x1, 'y': y1}, {'x': x2, 'y': y1},
+                        {'x': x2, 'y': y2}, {'x': x1, 'y': y2}
+                    ]
+                })
+
+    return jsonify(annotations)
+
+
+@app.route('/api/annotation/dataset/annotations/<image_name>', methods=['POST'])
+def save_dataset_annotations(image_name):
+    """保存图片的 YOLO 标注"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'error': 'No active dataset'}), 400
+
+    data = request.json or []
+    labels_dir = _get_dataset_labels_dir(ds_name)
+    os.makedirs(labels_dir, exist_ok=True)
+
+    label_path = os.path.join(labels_dir, os.path.splitext(image_name)[0] + '.txt')
+
+    # 加载类别映射
+    classes = _load_dataset_classes(ds_name)
+    class_index = {c['name']: i for i, c in enumerate(classes)}
+
+    # 获取图片尺寸
+    images_dir = _get_dataset_images_dir(ds_name)
+    img_path = os.path.join(images_dir, image_name)
+    try:
+        with Image.open(img_path) as img:
+            iw, ih = img.size
+    except Exception:
+        iw, ih = 640, 640
+
+    with open(label_path, 'w') as f:
+        for ann in data:
+            cls_name = ann.get('class', '')
+            if cls_name not in class_index:
+                # 自动添加新类别
+                color = ann.get('color', '#{:06x}'.format(hash(cls_name) % 0x1000000))
+                classes.append({'name': cls_name, 'color': color})
+                class_index[cls_name] = len(classes) - 1
+                _save_dataset_classes(ds_name, classes)
+
+            cls_id = class_index[cls_name]
+            pts = ann.get('points', [])
+
+            # 从 points 计算 bbox (取 min/max)
+            xs = [p['x'] if isinstance(p, dict) else p[0] for p in pts]
+            ys = [p['y'] if isinstance(p, dict) else p[1] for p in pts]
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+
+            # 转 YOLO 格式 (归一化)
+            cx = ((x_min + x_max) / 2) / iw
+            cy = ((y_min + y_max) / 2) / ih
+            w_norm = (x_max - x_min) / iw
+            h_norm = (y_max - y_min) / ih
+
+            f.write(f'{cls_id} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n')
+
+    return jsonify({'message': 'Annotations saved', 'count': len(data)})
+
+
+@app.route('/api/annotation/dataset/classes', methods=['GET'])
+def get_dataset_classes():
+    """获取当前数据集的类别（含统计）"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify([])
+    classes = _load_dataset_classes(ds_name)
+    stats = _get_class_stats(ds_name, classes)
+    # 合并统计到类别数据
+    for i, c in enumerate(classes):
+        c['image_count'] = stats[i]['image_count'] if i < len(stats) else 0
+        c['box_count'] = stats[i]['box_count'] if i < len(stats) else 0
+    return jsonify(classes)
+
+
+def _get_class_stats(ds_name, classes):
+    """统计每个类别的图片数和标注框数"""
+    ds_dir = _get_dataset_dir(ds_name)
+    labels_dir = _get_dataset_labels_dir(ds_name)
+    stats = [{'image_count': 0, 'box_count': 0} for _ in classes]
+
+    def _scan(dir_path):
+        if not os.path.isdir(dir_path):
+            return
+        for f in os.listdir(dir_path):
+            if not f.endswith('.txt') or f.startswith('.') or f.startswith('._'):
+                continue
+            if f == 'labels.cache':
+                continue
+            try:
+                with open(os.path.join(dir_path, f), 'r') as lf:
+                    class_ids = set()
+                    box_count = 0
+                    for line in lf:
+                        parts = line.strip().split()
+                        if parts:
+                            cid = int(parts[0])
+                            if cid < len(stats):
+                                class_ids.add(cid)
+                                stats[cid]['box_count'] += 1
+                    for cid in class_ids:
+                        stats[cid]['image_count'] += 1
+            except Exception:
+                pass
+
+    _scan(labels_dir)
+    # labels/ 为空则递归
+    if sum(s['box_count'] for s in stats) == 0:
+        for root, dirs, files in os.walk(ds_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__MACOSX']
+            _scan(root)
+
+    return stats
+
+
+@app.route('/api/annotation/dataset/classes', methods=['POST'])
+def save_dataset_classes():
+    """保存当前数据集的类别"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'error': 'No active dataset'}), 400
+    data = request.json or []
+    _save_dataset_classes(ds_name, data)
+    return jsonify({'message': 'Classes saved'})
+
+
+def _load_dataset_classes(ds_name):
+    """加载数据集的类别 — 优先 classes.json，其次 data.yaml"""
+    ds_dir = _get_dataset_dir(ds_name)
+
+    # 1) classes.json
+    path = os.path.join(ds_dir, 'classes.json')
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # 2) data.yaml
+    yaml_path = os.path.join(ds_dir, 'data.yaml')
+    if os.path.exists(yaml_path):
+        try:
+            import yaml
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                cfg = yaml.safe_load(f) or {}
+            names = cfg.get('names', [])
+            if isinstance(names, dict):
+                names = [names[k] for k in sorted(names)]
+            if names:
+                return [{'name': str(n), 'color': '#{:06x}'.format(hash(str(n)) % 0x1000000)} for n in names]
+        except Exception:
+            pass
+
+    # 3) 从 label 文件中扫描 class ID，生成占位名称
+    labels_dir = _get_dataset_labels_dir(ds_dir)
+    class_ids = set()
+    def _scan_labels(search_dir):
+        if os.path.isdir(search_dir):
+            for f in os.listdir(search_dir):
+                if f.endswith('.txt') and not f.startswith('.') and not f.startswith('._'):
+                    try:
+                        with open(os.path.join(search_dir, f), 'r') as lf:
+                            for line in lf:
+                                parts = line.strip().split()
+                                if parts:
+                                    class_ids.add(int(parts[0]))
+                    except Exception:
+                        pass
+    _scan_labels(labels_dir)
+    if not class_ids:
+        # 递归搜索
+        for root, dirs, files in os.walk(ds_dir):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__MACOSX']
+            for f in files:
+                if f.endswith('.txt') and not f.startswith('.') and not f.startswith('._'):
+                    try:
+                        with open(os.path.join(root, f), 'r') as lf:
+                            for line in lf:
+                                parts = line.strip().split()
+                                if parts:
+                                    class_ids.add(int(parts[0]))
+                    except Exception:
+                        pass
+
+    if class_ids:
+        max_id = max(class_ids) + 1
+        result = []
+        for i in range(max_id):
+            name = f'class_{i}' if i in class_ids else None
+            if name:
+                result.append({'name': name, 'color': '#{:06x}'.format(hash(name) % 0x1000000)})
+        return result
+
+    return []
+
+
+def _save_dataset_classes(ds_name, classes):
+    """保存数据集的类别"""
+    path = os.path.join(_get_dataset_dir(ds_name), 'classes.json')
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(classes, f, indent=2, ensure_ascii=False)
+
+
+# ---- 数据集下载 ----
+
+@app.route('/api/annotation/dataset/download', methods=['POST'])
+def download_dataset():
+    """下载活跃数据集为 ZIP"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': False, 'error': 'No active dataset'}), 400
+
+    import zipfile
+    import tempfile
+
+    ds_dir = _get_dataset_dir(ds_name)
+    tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(ds_dir):
+                for f in files:
+                    fpath = os.path.join(root, f)
+                    arcname = os.path.relpath(fpath, ds_dir)
+                    zf.write(fpath, arcname)
+        return send_file(tmp_path, as_attachment=True, download_name=f'{ds_name}.zip')
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---- 数据集列表（标注页用） ----
+
+@app.route('/api/annotation/datasets')
+def list_annotation_datasets():
+    """获取当前用户的所有数据集列表"""
+    username = get_current_user() or '_default'
+    base = os.path.join(BASE_PATH, 'uploads', username, 'training_datasets')
+    datasets = []
+    if os.path.isdir(base):
+        for name in sorted(os.listdir(base)):
+            p = os.path.join(base, name)
+            if os.path.isdir(p) and not name.startswith('.'):
+                # 优先统计 images/ 目录，其次递归扫描所有图片
+                images_dir = os.path.join(p, 'images')
+                img_count = 0
+                if os.path.isdir(images_dir):
+                    img_count += len([f for f in os.listdir(images_dir) if f.lower().endswith(('.png','.jpg','.jpeg','.bmp','.gif','.webp'))])
+                # 如果 images/ 为空，递归搜索所有子目录（兼容旧格式）
+                if img_count == 0:
+                    for root, dirs, files in os.walk(p):
+                        # 跳过 __MACOSX 和隐藏目录
+                        dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__MACOSX']
+                        img_count += len([f for f in files if f.lower().endswith(('.png','.jpg','.jpeg','.bmp','.gif','.webp'))])
+                datasets.append({'name': name, 'image_count': img_count})
+    return jsonify({'success': True, 'datasets': datasets, 'active': _get_active_dataset()})
+
+
+# ---- 从 datasets 中删除 (训练页用) ----
+
+@app.route('/api/annotation/dataset/delete', methods=['POST'])
+@require_auth
+def delete_annotation_dataset():
+    """删除数据集"""
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'success': False, 'error': '未指定数据集'}), 400
+
+    ds_dir = _get_dataset_dir(name)
+    if not os.path.exists(ds_dir):
+        return jsonify({'success': False, 'error': '数据集不存在'}), 404
+
+    shutil.rmtree(ds_dir, ignore_errors=True)
+
+    # 如果删的是活跃数据集，清除
+    username = get_current_user() or '_default'
+    ad = _load_active_datasets()
+    if ad.get(username) == name:
+        ad.pop(username, None)
+        _save_active_datasets(ad)
+
+    return jsonify({'success': True, 'message': f'数据集 {name} 已删除'})
+
+
+# ---- 数据集内单张图片删除 ----
+
+@app.route('/api/annotation/dataset/image-delete', methods=['POST'])
+@require_auth
+def delete_dataset_image():
+    """删除数据集中的单张图片及其标注"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': False, 'error': '未选择数据集'}), 400
+
+    data = request.json or {}
+    image_name = (data.get('image') or '').strip()
+    if not image_name:
+        return jsonify({'success': False, 'error': '未指定图片'}), 400
+
+    # 安全检查
+    if '..' in image_name or '/' in image_name:
+        return jsonify({'success': False, 'error': '无效文件名'}), 400
+
+    images_dir = _get_dataset_images_dir(ds_name)
+    labels_dir = _get_dataset_labels_dir(ds_name)
+
+    img_path = os.path.join(images_dir, image_name)
+    label_path = os.path.join(labels_dir, os.path.splitext(image_name)[0] + '.txt')
+
+    if os.path.exists(img_path):
+        os.remove(img_path)
+    if os.path.exists(label_path):
+        os.remove(label_path)
+
+    return jsonify({'success': True, 'message': f'已删除 {image_name}'})
+
+
+# ---- 模型推理标注 ----
+
+@app.route('/api/annotation/inference-models')
+def inference_models():
+    """获取可用的已训练模型列表"""
+    username = get_current_user() or '_default'
+    runs_dir = os.path.join(BASE_PATH, 'runs', username, 'train')
+    models = []
+
+    if os.path.isdir(runs_dir):
+        for name in sorted(os.listdir(runs_dir)):
+            best_path = os.path.join(runs_dir, name, 'weights', 'best.pt')
+            if os.path.exists(best_path):
+                mtime = os.path.getmtime(best_path)
+                models.append({
+                    'task_id': name,
+                    'display_name': name,
+                    'time': time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime)),
+                    'size_mb': round(os.path.getsize(best_path) / 1048576, 1)
+                })
+
+    models.sort(key=lambda x: x['time'], reverse=True)
+    return jsonify({'success': True, 'models': models})
+
+
+@app.route('/api/annotation/inference', methods=['POST'])
+@require_auth
+def run_inference():
+    """对选中的图片进行模型推理并保存标注"""
+    try:
+        from ultralytics import YOLO
+
+        ds_name = _get_active_dataset()
+        if not ds_name:
+            return jsonify({'success': False, 'error': '未选择数据集'}), 400
+
+        data = request.json or {}
+        task_id = data.get('task_id', '')
+        images = data.get('images', [])
+        conf = float(data.get('conf', 0.25))
+
+        if not task_id:
+            return jsonify({'success': False, 'error': '未选择模型'}), 400
+        if not images:
+            return jsonify({'success': False, 'error': '未选择图片'}), 400
+
+        username = get_current_user() or '_default'
+        model_path = os.path.join(BASE_PATH, 'runs', username, 'train', task_id, 'weights', 'best.pt')
+
+        if not os.path.exists(model_path):
+            return jsonify({'success': False, 'error': '模型文件不存在'}), 404
+
+        images_dir = _get_dataset_images_dir(ds_name)
+        labels_dir = _get_dataset_labels_dir(ds_name)
+        os.makedirs(labels_dir, exist_ok=True)
+
+        # 加载类别
+        classes = _load_dataset_classes(ds_name)
+        class_index = {c['name']: i for i, c in enumerate(classes)}
+        next_id = len(classes)
+
+        model = YOLO(model_path)
+        model_names = model.names  # {0: 'Bolt', 1: 'Bottle', ...}
+
+        def _iou(b1, b2):
+            """计算两个 bbox 的 IoU"""
+            x1 = max(b1[0], b2[0])
+            y1 = max(b1[1], b2[1])
+            x2 = min(b1[2], b2[2])
+            y2 = min(b1[3], b2[3])
+            inter = max(0, x2 - x1) * max(0, y2 - y1)
+            a1 = (b1[2] - b1[0]) * (b1[3] - b1[1])
+            a2 = (b2[2] - b2[0]) * (b2[3] - b2[1])
+            return inter / (a1 + a2 - inter) if (a1 + a2 - inter) > 0 else 0
+
+        results_list = []
+        for img_name in images:
+            img_path = os.path.join(images_dir, img_name)
+            if not os.path.exists(img_path):
+                continue
+
+            img = Image.open(img_path)
+            iw, ih = img.size
+
+            # 读取已有标注（去重用）
+            label_path = os.path.join(labels_dir, os.path.splitext(img_name)[0] + '.txt')
+            existing_boxes = {}  # {class_name: [(x1,y1,x2,y2), ...]}
+            if os.path.exists(label_path):
+                with open(label_path, 'r') as lf:
+                    for line in lf:
+                        parts = line.strip().split()
+                        if len(parts) >= 5:
+                            ecid = int(parts[0])
+                            ecx, ecy, ew, eh = map(float, parts[1:5])
+                            ex1 = (ecx - ew / 2) * iw
+                            ey1 = (ecy - eh / 2) * ih
+                            ex2 = (ecx + ew / 2) * iw
+                            ey2 = (ecy + eh / 2) * ih
+                            ename = classes[ecid]['name'] if ecid < len(classes) else ''
+                            if ename:
+                                existing_boxes.setdefault(ename, []).append([ex1, ey1, ex2, ey2])
+
+            # 推理
+            preds = model(img, conf=conf, verbose=False)
+            dets = []
+            skipped = 0
+            for r in preds:
+                boxes = r.boxes
+                if boxes is None:
+                    continue
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    cls_id = int(box.cls[0])
+                    cls_name = model_names.get(cls_id, f'class_{cls_id}')
+
+                    # 如果类别不存在，自动注册
+                    if cls_name not in class_index:
+                        color = '#{:06x}'.format(hash(cls_name) % 0x1000000)
+                        classes.append({'name': cls_name, 'color': color})
+                        class_index[cls_name] = next_id
+                        next_id += 1
+
+                    # IoU 去重: 和同类已有框重叠 > 0.5 则跳过
+                    new_box = [x1, y1, x2, y2]
+                    dup = False
+                    for eb in existing_boxes.get(cls_name, []):
+                        if _iou(new_box, eb) > 0.5:
+                            dup = True
+                            break
+                    if dup:
+                        skipped += 1
+                        continue
+
+                    cid = class_index[cls_name]
+                    cx = ((x1 + x2) / 2) / iw
+                    cy = ((y1 + y2) / 2) / ih
+                    w_norm = (x2 - x1) / iw
+                    h_norm = (y2 - y1) / ih
+
+                    dets.append({
+                        'class': cls_name,
+                        'confidence': round(float(box.conf[0]), 3),
+                        'bbox': [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)]
+                    })
+
+                    # 追加写入
+                    with open(label_path, 'a') as lf:
+                        lf.write(f'{cid} {cx:.6f} {cy:.6f} {w_norm:.6f} {h_norm:.6f}\n')
+
+                    # 同时加入 existing_boxes 避免同次推理内部重复
+                    existing_boxes.setdefault(cls_name, []).append(new_box)
+
+            results_list.append({'image': img_name, 'detections': len(dets), 'skipped': skipped, 'dets': dets})
+
+        # 保存新类别
+        _save_dataset_classes(ds_name, classes)
+
+        total = sum(r['detections'] for r in results_list)
+        total_skipped = sum(r.get('skipped', 0) for r in results_list)
+        msg = f'推理完成，{len(results_list)} 张图片新增 {total} 个目标'
+        if total_skipped > 0:
+            msg += f'，跳过 {total_skipped} 个重复框'
+        return jsonify({
+            'success': True,
+            'total_detections': total,
+            'skipped': total_skipped,
+            'results': results_list,
+            'message': msg
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({'success': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
+# ---- 原标注 API (保留兼容) ----
+@app.route('/api/annotation/classes', methods=['GET'])
 def get_classes():
     """获取所有类别"""
     classes = []
-    if os.path.exists(CLASSES_FILE):
-        with open(CLASSES_FILE, 'r', encoding='utf-8') as f:
+    if os.path.exists(get_user_classes_file()):
+        with open(get_user_classes_file(), 'r', encoding='utf-8') as f:
             classes = json.load(f)
     return jsonify(classes)
 
 
+@app.route('/api/annotation/classes', methods=['POST'])
 def save_classes():
     """保存所有类别"""
     data = request.json
     
-    # 确保ANNOTATIONS_FOLDER目录存在
-    os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
+    # 确保get_user_data_dir('annotations')目录存在
+    os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
     
-    with open(CLASSES_FILE, 'w', encoding='utf-8') as f:
+    with open(get_user_classes_file(), 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
     
     return jsonify({'message': 'Classes saved successfully'})
 
 
+@app.route('/api/annotation/images', methods=['GET'])
 def get_images():
     """获取所有上传的图片"""
     images = []
     
     # 读取标注信息，用于获取每张图片的标注数量
     annotations = {}
-    if os.path.exists(ANNOTATIONS_FILE):
+    if os.path.exists(get_user_annotations_file()):
         try:
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         except json.JSONDecodeError:
             # 如果JSON文件无效或为空，使用空字典
@@ -461,7 +1931,7 @@ def get_images():
             annotations = {}
     
     # 获取所有图片文件，并按照创建时间排序（最新的在最后）
-    upload_folder = app.config['UPLOAD_FOLDER']
+    upload_folder = get_user_data_dir('samples')
     image_files = []
     
     for filename in os.listdir(upload_folder):
@@ -501,6 +1971,7 @@ def get_images():
     return jsonify({'images': images})
 
 
+@app.route('/api/annotation/images/delete', methods=['POST'])
 def delete_images():
     """删除指定的图片"""
     data = request.json or {}
@@ -512,22 +1983,22 @@ def delete_images():
     for image_name in image_names:
         try:
             # 删除图片文件
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
+            image_path = os.path.join(get_user_data_dir('samples'), image_name)
             if os.path.exists(image_path):
                 os.remove(image_path)
                 deleted_count += 1
                 
                 # 同时删除对应的标注信息
                 annotations = {}
-                if os.path.exists(ANNOTATIONS_FILE):
-                    with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+                if os.path.exists(get_user_annotations_file()):
+                    with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                         annotations = json.load(f)
                     
                 if image_name in annotations:
                     del annotations[image_name]
-                    # 确保ANNOTATIONS_FOLDER目录存在
-                    os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
-                    with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+                    # 确保get_user_data_dir('annotations')目录存在
+                    os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
+                    with open(get_user_annotations_file(), 'w', encoding='utf-8') as f:
                         json.dump(annotations, f, indent=2)
             else:
                 errors.append(f"图片 '{image_name}' 不存在")
@@ -547,7 +2018,26 @@ def delete_images():
     })
 
 
+@app.route('/api/annotation/images/upload', methods=['POST'])
+def upload_annotation_images():
+    """上传图片到标注目录"""
+    import os as _os
+    if 'images' not in request.files and 'image' not in request.files:
+        return jsonify({'success': False, 'error': '未找到上传的图片'}), 400
+    files = request.files.getlist('images') or [request.files['image']]
+    samples_dir = get_user_data_dir('samples')
+    uploaded = []
+    for file in files:
+        if file.filename == '':
+            continue
+        fname = _os.path.basename(file.filename)
+        file.save(_os.path.join(samples_dir, fname))
+        uploaded.append(fname)
+    return jsonify({'success': True, 'uploaded': uploaded, 'count': len(uploaded)})
+
+
 @app.route('/api/files/delete', methods=['POST'])
+@require_auth
 def delete_files():
     """删除指定的文件"""
     data = request.json or {}
@@ -584,15 +2074,15 @@ def delete_files():
             if os.path.splitext(file_path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
                 image_name = os.path.basename(file_path)
                 annotations = {}
-                if os.path.exists(ANNOTATIONS_FILE):
-                    with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+                if os.path.exists(get_user_annotations_file()):
+                    with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                         annotations = json.load(f)
                     
                 if image_name in annotations:
                     del annotations[image_name]
-                    # 确保ANNOTATIONS_FOLDER目录存在
-                    os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
-                    with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+                    # 确保get_user_data_dir('annotations')目录存在
+                    os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
+                    with open(get_user_annotations_file(), 'w', encoding='utf-8') as f:
                         json.dump(annotations, f, indent=2)
         except Exception as e:
             errors.append(f"删除文件 '{file_path}' 失败: {str(e)}")
@@ -611,6 +2101,7 @@ def delete_files():
 
 
 @app.route('/api/files/create-folder', methods=['POST'])
+@require_auth
 def create_folder():
     """创建新文件夹"""
     data = request.json or {}
@@ -657,9 +2148,19 @@ def create_folder():
 
 
 @app.route('/api/files/upload', methods=['POST'])
+@require_auth
 def upload_files():
     """上传文件"""
     try:
+        # 存储配额检查
+        ok, used, max_gb, reason = _check_storage_quota()
+        if not ok:
+            return jsonify({
+                'success': False,
+                'error': reason,
+                'quota_exceeded': True
+            }), 413
+
         # 获取路径参数
         path = request.form.get('path', 'uploads')
         
@@ -782,6 +2283,7 @@ def upload_video_for_label():
 
 
 @app.route('/api/files/download', methods=['POST'])
+@require_auth
 def download_files():
     """批量下载文件，将选中的文件压缩成tar文件后下载"""
     try:
@@ -841,9 +2343,10 @@ def download_files():
         }), 500
 
 
+@app.route('/api/annotation/image/<filename>', methods=['GET'])
 def get_image(filename):
     """获取指定图片"""
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(get_user_data_dir('samples'), filename)
 
 @app.route('/uploads/<path:filename>')
 def serve_uploads(filename):
@@ -877,7 +2380,7 @@ def upload_folder():
     
     for file in files:
         if file.filename != '':
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename or '')
+            filepath = os.path.join(get_user_data_dir('samples'), file.filename or '')
             file.save(filepath)
             uploaded_files.append(file.filename or '')
     
@@ -896,13 +2399,13 @@ def upload_labelme_dataset():
         
         # 读取现有的类别和标注信息
         classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(get_user_classes_file()):
+            with open(get_user_classes_file(), 'r', encoding='utf-8') as f:
                 classes = json.load(f)
         
         annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(get_user_annotations_file()):
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 try:
                     annotations = json.load(f)
                 except json.JSONDecodeError:
@@ -928,14 +2431,14 @@ def upload_labelme_dataset():
                     json_files[pure_filename] = file
         
         # 确保上传目录存在
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        os.makedirs(get_user_data_dir('samples'), exist_ok=True)
         
         # 已处理的JSON文件集合，避免重复处理
         processed_json_files = set()
         
         # 处理图像文件
         for image_filename, image_file in image_files.items():
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_filename)
+            image_path = os.path.join(get_user_data_dir('samples'), image_filename)
             image_file.save(image_path)
             uploaded_files.append(image_filename)
             
@@ -974,7 +2477,7 @@ def upload_labelme_dataset():
             if image_data:
                 try:
                     image_bytes = base64.b64decode(image_data)
-                    image_save_path = os.path.join(app.config['UPLOAD_FOLDER'], image_filename)
+                    image_save_path = os.path.join(get_user_data_dir('samples'), image_filename)
                     with open(image_save_path, 'wb') as f:
                         f.write(image_bytes)
                     uploaded_files.append(image_filename)
@@ -987,11 +2490,11 @@ def upload_labelme_dataset():
             processed_annotations += 1
         
         # 保存更新后的类别和标注信息
-        os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
-        with open(CLASSES_FILE, 'w', encoding='utf-8') as f:
+        os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
+        with open(get_user_classes_file(), 'w', encoding='utf-8') as f:
             json.dump(classes, f, indent=2)
         
-        with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+        with open(get_user_annotations_file(), 'w', encoding='utf-8') as f:
             json.dump(annotations, f, indent=2)
         
         return jsonify({
@@ -1105,8 +2608,8 @@ def ai_label():
         
         # 读取现有的标注信息
         annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(get_user_annotations_file()):
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         
         processed_count = 0
@@ -1117,7 +2620,7 @@ def ai_label():
         # 处理每张图片
         for image_name in images:
             # 构建图片路径
-            image_path = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
+            image_path = os.path.join(get_user_data_dir('samples'), image_name)
             if not os.path.exists(image_path):
                 logging.error(f"Image not found: {image_path}")
                 continue
@@ -1212,9 +2715,9 @@ def ai_label():
                 continue
         
         # 保存更新后的标注信息
-        # 确保ANNOTATIONS_FOLDER目录存在
-        os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
-        with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+        # 确保get_user_data_dir('annotations')目录存在
+        os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
+        with open(get_user_annotations_file(), 'w', encoding='utf-8') as f:
             json.dump(annotations, f, indent=2, ensure_ascii=False)
         
         # 发送最终进度更新
@@ -1258,6 +2761,7 @@ def ai_label():
         }), 500
 
 
+@app.route('/api/annotation/video/upload', methods=['POST'])
 def upload_video():
     """上传视频文件并抽帧"""
     if 'video' not in request.files:
@@ -1271,7 +2775,7 @@ def upload_video():
     
     try:
         # 保存视频文件到临时位置
-        temp_video_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_' + (video_file.filename or 'video'))
+        temp_video_path = os.path.join(get_user_data_dir('samples'), 'temp_' + (video_file.filename or 'video'))
         video_file.save(temp_video_path)
         
         # 抽帧处理，传递原始文件名
@@ -1313,7 +2817,7 @@ def extract_frames(video_path, frame_interval, original_filename=None):
         if frame_count % frame_interval == 0:
             # 生成文件名
             frame_filename = f"{video_name}_frame_{saved_frame_count:06d}.jpg"
-            frame_path = os.path.join(app.config['UPLOAD_FOLDER'], frame_filename)
+            frame_path = os.path.join(get_user_data_dir('samples'), frame_filename)
             
             # 保存帧为图片
             cv2.imwrite(frame_path, frame)
@@ -1326,12 +2830,13 @@ def extract_frames(video_path, frame_interval, original_filename=None):
     return extracted_frames
 
 
+@app.route('/api/annotation/annotations/<image_name>', methods=['GET'])
 def get_annotations(image_name):
     """获取特定图片的标注"""
     annotations = {}
-    if os.path.exists(ANNOTATIONS_FILE):
+    if os.path.exists(get_user_annotations_file()):
         try:
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         except json.JSONDecodeError:
             # 如果JSON文件无效或为空，使用空字典
@@ -1345,14 +2850,15 @@ def get_annotations(image_name):
     return jsonify(image_annotations)
 
 
+@app.route('/api/annotation/annotations/<image_name>', methods=['POST'])
 def save_annotations(image_name):
     """保存特定图片的标注"""
     data = request.json
     
     annotations = {}
-    if os.path.exists(ANNOTATIONS_FILE):
+    if os.path.exists(get_user_annotations_file()):
         try:
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         except json.JSONDecodeError:
             # 如果JSON文件无效或为空，使用空字典
@@ -1364,9 +2870,9 @@ def save_annotations(image_name):
     
     annotations[image_name] = data
     
-    # 确保ANNOTATIONS_FOLDER目录存在
-    os.makedirs(ANNOTATIONS_FOLDER, exist_ok=True)
-    with open(ANNOTATIONS_FILE, 'w', encoding='utf-8') as f:
+    # 确保get_user_data_dir('annotations')目录存在
+    os.makedirs(get_user_data_dir('annotations'), exist_ok=True)
+    with open(get_user_annotations_file(), 'w', encoding='utf-8') as f:
         json.dump(annotations, f, indent=2, ensure_ascii=False)
     
     return jsonify({'message': 'Annotations saved successfully'})
@@ -1804,6 +3310,7 @@ def list_models():
 
 
 @app.route('/api/upload-model', methods=['POST'])
+@require_auth
 def upload_model():
     """上传YOLO11模型文件"""
     models_dir = os.path.join(app.root_path, 'pre_models')
@@ -1825,6 +3332,7 @@ def upload_model():
 
 
 @app.route('/api/delete-model', methods=['POST'])
+@require_auth
 def delete_model():
     """删除YOLO11模型文件"""
     data = request.json or {}
@@ -1846,6 +3354,7 @@ def delete_model():
         return jsonify({'success': False, 'error': f'删除模型失败: {str(e)}'})
 
 
+@app.route('/api/annotation/export', methods=['POST'])
 def export_dataset():
     """导出数据集"""
     try:
@@ -1870,10 +3379,14 @@ def export_dataset():
         
         # 获取全局类别列表
         classes = []
-        if os.path.exists(CLASSES_FILE):
-            with open(CLASSES_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(get_user_classes_file()):
+            with open(get_user_classes_file(), 'r', encoding='utf-8') as f:
                 classes = json.load(f)
-        
+
+        # 如果前端没有指定类别，使用全部类别
+        if not selected_classes:
+            selected_classes = [c['name'] for c in classes]
+
         # 创建临时目录用于生成数据集
         import tempfile
         import zipfile
@@ -1893,14 +3406,14 @@ def export_dataset():
         
         # 获取所有图片
         images = []
-        for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+        for filename in os.listdir(get_user_data_dir('samples')):
             if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                 images.append(filename)
         
         # 根据样本选择参数过滤图片
         annotations = {}
-        if os.path.exists(ANNOTATIONS_FILE):
-            with open(ANNOTATIONS_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(get_user_annotations_file()):
+            with open(get_user_annotations_file(), 'r', encoding='utf-8') as f:
                 annotations = json.load(f)
         
         # 根据用户选择过滤图片
@@ -1978,7 +3491,7 @@ names: {selected_classes}
         for split_name, split_images in splits:
             for image_name in split_images:
                 # 复制图片，添加前缀
-                src_img_path = os.path.join(app.config['UPLOAD_FOLDER'], image_name)
+                src_img_path = os.path.join(get_user_data_dir('samples'), image_name)
                 if export_prefix:
                     dst_img_name = f"{export_prefix}_{image_name}"
                 else:
@@ -2241,9 +3754,10 @@ def _dir_size(path):
 
 class TrainingTask:
     """训练任务管理类"""
-    def __init__(self, task_id, config):
+    def __init__(self, task_id, config, username=''):
         self.task_id = task_id
         self.config = config
+        self.username = username
         self.status = 'idle'  # idle, running, paused, completed, error
         self.current_epoch = 0
         self.total_epochs = config.get('epochs', 100)
@@ -2270,14 +3784,33 @@ class TrainingTask:
 training_tasks = {}
 
 @app.route('/api/training/start', methods=['POST'])
+@require_auth
 def start_training():
     """开始训练任务"""
     try:
+        # 全局训练锁
+        for tid, t in list(training_tasks.items()):
+            if t.status == 'running':
+                return jsonify({
+                    'success': False,
+                    'error': f'{t.username or "其他用户"} 正在训练中，请等待完成后再试'
+                }), 409
+
+        # 存储配额检查
+        ok, used, max_gb, reason = _check_storage_quota()
+        if not ok:
+            return jsonify({
+                'success': False,
+                'error': reason,
+                'quota_exceeded': True
+            }), 413
+
         config = request.json
         task_id = f"train_{int(time.time())}"
-        
+        username = get_current_user() or 'unknown'
+
         # 创建训练任务
-        task = TrainingTask(task_id, config)
+        task = TrainingTask(task_id, config, username)
         training_tasks[task_id] = task
         
         # 启动训练线程
@@ -2380,7 +3913,7 @@ def run_training(task):
             'epochs': epochs,
             'batch_size': batch_size,
             'image_size': image_size,
-            'project': os.path.join(app.root_path, 'runs', 'train'),
+            'project': os.path.join(BASE_PATH, 'runs', task.username or '_default', 'train'),
             'name': task.task_id,
             'exist_ok': True,
             'optimizer': config.get('optimizer', 'SGD'),
@@ -2403,7 +3936,7 @@ def run_training(task):
         train_script_path = os.path.join(tmp_dir, f'tmp_worker_{task.task_id}.py')
 
         # 日志文件 —— server 轮询这个文件推送前端
-        log_dir = os.path.join(app.root_path, 'logs')
+        log_dir = os.path.join(BASE_PATH, 'logs', task.username or '_default')
         os.makedirs(log_dir, exist_ok=True)
         train_log_path = os.path.join(log_dir, f'{task.task_id}.log')
 
@@ -2568,34 +4101,39 @@ def run_training(task):
                     last = rows[-1]
                     epoch = int(last.get('epoch', 0))
                     metrics = {}
-                    for key in last:
+                    for key, val in last.items():
                         kl = key.lower()
-                        if 'map50-95' in kl:
-                            metrics['map50_95'] = float(last[key])
-                        elif 'map50' in kl:
-                            metrics['map50'] = float(last[key])
-                        elif 'precision' in kl:
-                            metrics['precision'] = float(last[key])
-                        elif 'recall' in kl:
-                            metrics['recall'] = float(last[key])
+                        if not val or not val.strip():
+                            continue
+                        try:
+                            if 'map50-95' in kl:
+                                metrics['map50_95'] = float(val)
+                            elif 'map50' in kl:
+                                metrics['map50'] = float(val)
+                            elif 'precision' in kl:
+                                metrics['precision'] = float(val)
+                            elif 'recall' in kl:
+                                metrics['recall'] = float(val)
+                        except (ValueError, TypeError):
+                            pass
                     return {'epoch': epoch, 'metrics': metrics}
             except Exception:
                 pass
             return None
 
-        import re as _re
-        # 匹配 ultralytics tqdm 训练进度行: "  1/100  0G  1.926  ..."
-        _epoch_re = _re.compile(r'^\s*(\d+)\s*/\s*(\d+)')
+        _ansi_re = __import__('re').compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
         while process.poll() is None:
             _time.sleep(1.5)
 
+            # 推送日志
             for raw in _read_new_lines():
                 line = raw.strip()
                 if not line:
                     continue
                 if '\r' in line:
                     line = line.rsplit('\r', 1)[-1].strip()
+                line = _ansi_re.sub('', line).strip()
                 if not line:
                     continue
                 if line.startswith('[train] COMPLETE:'):
@@ -2605,23 +4143,14 @@ def run_training(task):
                         pass
                 else:
                     socketio.emit('training_log', {'message': line, 'level': 'info'})
-                    # 从日志行解析当前 epoch 进度
-                    m = _epoch_re.match(line)
-                    if m:
-                        task.current_epoch = int(m.group(1))
-                        task.progress = min(99.0, round(task.current_epoch / max(task.total_epochs, 1) * 100, 1))
-                        socketio.emit('training_progress', {
-                            'task_id': task.task_id,
-                            'current_epoch': task.current_epoch,
-                            'total_epochs': task.total_epochs,
-                            'progress': task.progress,
-                            'metrics': task.metrics
-                        })
 
+            # 统一从 CSV 读取 epoch + metrics（epoch +1 补偿滞后）
             result = _read_results()
             if result:
-                task.current_epoch = result['epoch']
-                task.progress = min(99.0, round(result['epoch'] / max(task.total_epochs, 1) * 100, 1))
+                epoch = result['epoch'] + 1  # CSV 记录已完成 epoch，当前正在跑下一轮
+                if epoch > task.current_epoch:
+                    task.current_epoch = epoch
+                    task.progress = min(99.0, round(epoch / max(task.total_epochs, 1) * 100, 1))
                 task.metrics.update(result['metrics'])
                 socketio.emit('training_progress', {
                     'task_id': task.task_id,
@@ -2649,6 +4178,19 @@ def run_training(task):
         result = _read_results()
         if result:
             task.metrics.update(result['metrics'])
+
+        # 训练完成，设为 100%
+        if task.status == 'running':
+            task.current_epoch = task.total_epochs
+            task.progress = 100.0
+            task.metrics.update(result['metrics'] if result else {})
+            socketio.emit('training_progress', {
+                'task_id': task.task_id,
+                'current_epoch': task.current_epoch,
+                'total_epochs': task.total_epochs,
+                'progress': 100.0,
+                'metrics': task.metrics
+            })
 
         if os.path.exists(config_path):
             os.remove(config_path)
@@ -2680,6 +4222,7 @@ def run_training(task):
         socketio.emit('training_error', {'task_id': task.task_id, 'error': str(e)})
 
 @app.route('/api/training/stop', methods=['POST'])
+@require_auth
 def stop_training():
     """停止训练任务"""
     try:
@@ -2757,18 +4300,34 @@ def get_active_training():
                 'success': True,
                 'task': task.to_dict()
             })
-    # 没有活跃任务时返回 null，不返回已完成/已出错的旧数据
     return jsonify({
         'success': True,
         'task': None
     })
+
+
+@app.route('/api/training/global-status')
+def global_training_status():
+    """全局训练状态 (所有用户可见)"""
+    for task_id, task in training_tasks.items():
+        if task.status == 'running':
+            return jsonify({
+                'success': True,
+                'busy': True,
+                'username': task.username or '未知',
+                'task_id': task.task_id,
+                'current_epoch': task.current_epoch,
+                'total_epochs': task.total_epochs,
+                'progress': task.progress
+            })
+    return jsonify({'success': True, 'busy': False})
 
 @app.route('/api/training/download/<task_id>')
 def download_trained_model(task_id):
     """下载训练好的模型"""
     import os
     
-    model_path = f'runs/train/{task_id}/weights/best.pt'
+    model_path = os.path.join(get_user_runs_dir(), task_id, 'weights', 'best.pt')
     
     if not os.path.exists(model_path):
         return jsonify({
@@ -2786,7 +4345,7 @@ def download_trained_model(task_id):
 @app.route('/api/training/model-file/<task_id>/<filename>')
 def serve_model_file(task_id, filename):
     """提供训练目录中的文件（图片、CSV 等）"""
-    run_dir = os.path.join(app.root_path, 'runs', 'train', task_id)
+    run_dir = os.path.join(get_user_runs_dir(), task_id)
     if '..' in filename or '/' in filename:
         return jsonify({'success': False, 'error': '无效文件名'}), 400
     file_path = os.path.join(run_dir, filename)
@@ -2801,7 +4360,7 @@ def serve_model_file(task_id, filename):
 def available_trained_models():
     """获取已训练好的模型列表（含文件列表和摘要）"""
     models = []
-    runs_dir = os.path.join(app.root_path, 'runs', 'train')
+    runs_dir = get_user_runs_dir()
 
     if os.path.exists(runs_dir) and os.path.isdir(runs_dir):
         for name in os.listdir(runs_dir):
@@ -2820,13 +4379,23 @@ def available_trained_models():
             for fname in os.listdir(run_dir):
                 fpath = os.path.join(run_dir, fname)
                 if os.path.isfile(fpath):
-                    files.append({'name': fname, 'size_mb': round(os.path.getsize(fpath) / 1048576, 2)})
+                    fmtime = os.path.getmtime(fpath)
+                    files.append({
+                        'name': fname,
+                        'size_mb': round(os.path.getsize(fpath) / 1048576, 2),
+                        'time': _time.strftime('%H:%M:%S', _time.localtime(fmtime))
+                    })
             weights_dir = os.path.join(run_dir, 'weights')
             if os.path.isdir(weights_dir):
                 for fname in os.listdir(weights_dir):
                     fpath = os.path.join(weights_dir, fname)
                     if os.path.isfile(fpath):
-                        files.append({'name': fname, 'size_mb': round(os.path.getsize(fpath) / 1048576, 2)})
+                        fmtime = os.path.getmtime(fpath)
+                        files.append({
+                            'name': fname,
+                            'size_mb': round(os.path.getsize(fpath) / 1048576, 2),
+                            'time': _time.strftime('%H:%M:%S', _time.localtime(fmtime))
+                        })
 
             summary = {}
             args_yaml = os.path.join(run_dir, 'args.yaml')
@@ -2858,7 +4427,7 @@ def available_trained_models():
 @app.route('/api/training/model-info/<task_id>')
 def get_model_info(task_id):
     """获取指定训练模型的详细信息"""
-    run_dir = os.path.join(app.root_path, 'runs', 'train', task_id)
+    run_dir = os.path.join(get_user_runs_dir(), task_id)
     if not os.path.exists(run_dir):
         return jsonify({'success': False, 'error': '模型目录不存在'})
 
@@ -2920,6 +4489,7 @@ def get_model_info(task_id):
 
 
 @app.route('/api/training/rename-model', methods=['POST'])
+@require_auth
 def rename_trained_model():
     """重命名训练结果目录"""
     try:
@@ -2933,7 +4503,7 @@ def rename_trained_model():
         if not all(c.isalnum() or c in '-_ .' for c in new_name) or '..' in new_name:
             return jsonify({'success': False, 'error': '名称只能包含字母、数字、中划线、下划线和空格'}), 400
 
-        runs_dir = os.path.join(app.root_path, 'runs', 'train')
+        runs_dir = get_user_runs_dir()
         old_path = os.path.join(runs_dir, task_id)
         new_path = os.path.join(runs_dir, new_name)
 
@@ -2949,6 +4519,7 @@ def rename_trained_model():
 
 
 @app.route('/api/training/delete-model', methods=['POST'])
+@require_auth
 def delete_trained_model():
     """删除训练结果目录"""
     try:
@@ -2958,7 +4529,7 @@ def delete_trained_model():
         if not task_id:
             return jsonify({'success': False, 'error': '参数不完整'}), 400
 
-        runs_dir = os.path.join(app.root_path, 'runs', 'train')
+        runs_dir = get_user_runs_dir()
         target = os.path.realpath(os.path.join(runs_dir, task_id))
         real_runs = os.path.realpath(runs_dir)
 
@@ -2982,6 +4553,7 @@ def delete_trained_model():
 
 
 @app.route('/api/training/test-model', methods=['POST'])
+@require_auth
 def test_trained_model():
     """使用训练好的best.pt模型测试图片"""
     import base64
@@ -2999,7 +4571,7 @@ def test_trained_model():
         if not task_id:
             return jsonify({'success': False, 'error': '缺少task_id'}), 400
 
-        model_path = os.path.join(app.root_path, 'runs', 'train', task_id, 'weights', 'best.pt')
+        model_path = os.path.join(get_user_runs_dir(), task_id, 'weights', 'best.pt')
         if not os.path.exists(model_path):
             return jsonify({'success': False, 'error': 'best.pt模型文件不存在，请先完成训练'}), 404
 
@@ -3054,14 +4626,57 @@ def test_trained_model():
             'traceback': traceback.format_exc()
         }), 500
 
+@app.route('/api/training/dataset/download')
+def download_training_dataset():
+    """下载指定数据集为 ZIP"""
+    ds_name = request.args.get('name', '').strip()
+    if not ds_name:
+        return jsonify({'success': False, 'error': '未指定数据集'}), 400
+
+    import zipfile
+    import tempfile
+
+    username = get_current_user() or '_default'
+    ds_dir = os.path.join(BASE_PATH, 'uploads', username, 'training_datasets', ds_name)
+    if not os.path.isdir(ds_dir):
+        return jsonify({'success': False, 'error': '数据集不存在'}), 404
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(ds_dir):
+                for f in files:
+                    fpath = os.path.join(root, f)
+                    arcname = os.path.relpath(fpath, ds_dir)
+                    zf.write(fpath, arcname)
+        return send_file(tmp_path, as_attachment=True, download_name=f'{ds_name}.zip')
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/training/upload-dataset', methods=['POST'])
+@require_auth
 def upload_dataset():
     """上传并解压数据集ZIP文件"""
     import os
     import zipfile
     import shutil
-    
+
     try:
+        # 存储配额检查
+        ok, used, max_gb, reason = _check_storage_quota()
+        if not ok:
+            return jsonify({
+                'success': False,
+                'error': reason,
+                'quota_exceeded': True
+            }), 413
+
         # 检查是否有文件上传
         if 'dataset' not in request.files:
             return jsonify({
@@ -3085,7 +4700,7 @@ def upload_dataset():
             }), 400
         
         # 创建上传目录
-        upload_dir = os.path.join(app.root_path, 'uploads', 'training_datasets')
+        upload_dir = get_user_data_dir('training_datasets')
         os.makedirs(upload_dir, exist_ok=True)
         
         zip_path = os.path.join(upload_dir, file.filename)
@@ -3153,7 +4768,7 @@ def list_datasets():
     import os
     
     try:
-        upload_dir = os.path.join(app.root_path, 'uploads', 'training_datasets')
+        upload_dir = get_user_data_dir('training_datasets')
         
         datasets = []
         if os.path.exists(upload_dir):
@@ -3188,6 +4803,7 @@ def list_datasets():
 
 
 @app.route('/api/training/remove-dataset', methods=['POST'])
+@require_auth
 def remove_dataset():
     """移除已上传的数据集"""
     import os
@@ -3204,7 +4820,7 @@ def remove_dataset():
             }), 400
         
         # 安全检查：只允许删除 uploads/training_datasets 下的内容
-        upload_dir = os.path.join(app.root_path, 'uploads', 'training_datasets')
+        upload_dir = get_user_data_dir('training_datasets')
         real_path = os.path.realpath(dataset_path)
         real_upload = os.path.realpath(upload_dir)
         if not real_path.startswith(real_upload + os.sep) and real_path != real_upload:
@@ -3237,8 +4853,8 @@ def remove_dataset():
 @app.route('/api/training/storage')
 def get_storage_usage():
     """获取数据集和训练结果的存储使用情况"""
-    datasets_dir = os.path.join(app.root_path, 'uploads', 'training_datasets')
-    models_dir = os.path.join(app.root_path, 'runs', 'train')
+    datasets_dir = get_user_data_dir('training_datasets')
+    models_dir = get_user_runs_dir()
     dataset_bytes = _dir_size(datasets_dir)
     model_bytes = _dir_size(models_dir)
     return jsonify({
@@ -3295,5 +4911,3 @@ if __name__ == '__main__':
     
     # 使用SocketIO运行应用，使用命令行参数
     socketio.run(app, debug=args.debug, host=args.host, port=args.port, allow_unsafe_werkzeug=True)
-
-训练进度

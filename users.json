@@ -1,0 +1,16 @@
+{
+  "admin": {
+    "password": "admin123",
+    "is_admin": true
+  },
+  "testuser2": {
+    "password": "newpass5678",
+    "is_admin": false,
+    "created_at": "2026-07-11 21:40:32"
+  },
+  "sg": {
+    "password": "kjkljkjkljsadkljkl",
+    "is_admin": false,
+    "created_at": "2026-07-11 21:51:03"
+  }
+}
