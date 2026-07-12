@@ -47,4 +47,6 @@ mt-platform/
 
 ## License
 
-MIT
+本项目 MIT License，参见 [LICENSE](LICENSE)。
+
+**注意：** 本项目集成了 [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)，Ultralytics 使用 **AGPL-3.0** 许可证。根据 AGPL-3.0 要求，任何通过网络使用本软件的用户均有权获取完整源代码。本仓库已公开全部源码以满足 AGPL-3.0 条款。
