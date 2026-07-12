@@ -711,6 +711,9 @@
                         if (currentUser) {
                             document.getElementById('stopTrainingBtn').disabled = false;
                         }
+                        // 训练中取消数据集选中
+                        uploadedDatasetPath = null;
+                        renderDatasetList();
                         updateTrainingProgress({
                             progress: task.progress,
                             current_epoch: task.current_epoch,
@@ -1016,6 +1019,9 @@
                     updateTrainingStatus('running', '训练进行中...');
                     document.getElementById('startTrainingBtn').disabled = true;
                     document.getElementById('stopTrainingBtn').disabled = false;
+                    // 训练中取消数据集选中，防止误操作
+                    uploadedDatasetPath = null;
+                    renderDatasetList();
                     addLogLine('训练任务已启动', 'success');
                     // 启动已用时间计时器
                     if (elapsedTimer) clearInterval(elapsedTimer);

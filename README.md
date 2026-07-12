@@ -43,7 +43,7 @@ mt-platform/
 
 ## 致谢
 
-本项目基于 [xclabel](https://github.com/beixiaocai/xclabel) (MIT License) 二次开发，借鉴了其 UI 设计训练逻辑，添加了多用户系统功能，自己的标注功能和模型训练功能，删除了AI辅助标注功能，采用模型直接推理标注。
+本项目基于 [xclabel](https://github.com/beixiaocai/xclabel) (MIT License) 二次开发，借鉴了其 UI 设计训练逻辑，添加了多用户系统功能，自己的标注功能和模型训练功能，删除了大模型AI辅助标注功能，采用模型直接推理标注。
 
 ## License
 
