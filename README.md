@@ -50,3 +50,11 @@ mt-platform/
 本项目使用 **GNU Affero General Public License v3.0 (AGPL-3.0)**，参见 [LICENSE](LICENSE)。
 
 本软件集成了 [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)，同样基于 AGPL-3.0 许可。
+
+### 免责声明
+
+本项目仅作为 **学习和研究用途的参考模板** 提供，不构成任何形式的商业授权、质量保证或合规承诺。
+
+- 使用者应自行评估并遵守适用的法律法规，包括但不限于数据保护、隐私合规以及 AGPL-3.0 开源协议的义务。
+- 若将本项目或其衍生作品用于**商业环境**，请自行承担全部责任，并确保已充分理解 AGPL-3.0 对网络服务场景的约束。
+- 项目中涉及的 AI 模型推理结果仅供参考，不保证标注精度和训练效果，使用者需自行验证。
