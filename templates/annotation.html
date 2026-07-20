@@ -16,6 +16,14 @@
     </div>
 </div>
 
+<!-- 上传遮罩 -->
+<div class="upload-overlay" id="uploadOverlay">
+    <i class="fas fa-cloud-upload-alt upload-spinner"></i>
+    <div class="upload-text">正在上传数据集，请稍候...</div>
+    <div class="upload-progress"><div class="upload-progress-bar" id="uploadProgressBar"></div></div>
+    <div class="upload-percent" id="uploadPercent">0%</div>
+</div>
+
 <div class="training-container">
     <header class="navbar">
         <div class="logo">
@@ -26,6 +34,11 @@
             <a class="btn btn-secondary btn-sm" href="/">训练面板</a>
         </div>
     </header>
+
+    <!-- 训练锁定横幅 -->
+    <div id="datasetLockBanner" style="display:none;background:#fef3c7;color:#92400e;padding:8px 16px;text-align:center;font-size:13px;font-weight:500;border-bottom:1px solid #fcd34d;">
+        <i class="fas fa-lock"></i> <span id="lockBannerText">数据集正在训练中，标注功能已锁定</span>
+    </div>
 
     <div class="main-content" style="display:flex;flex:1;overflow:hidden;padding:0;">
         <!-- ====== 左侧：图片列表 ====== -->
@@ -133,6 +146,7 @@
     var drawStartX, drawStartY;
     var dragMode = null;
     var dragStartPoints = null;
+    var dragStartMouse = null;
     var undoStack = [];
     var HANDLE_SIZE = 8;
     var COLORS = ['#3B82F6','#EF4444','#10B981','#F59E0B','#8B5CF6','#EC4899','#06B6D4','#F97316','#6366F1','#14B8A6'];
@@ -182,11 +196,12 @@
         });
     }
 
-    function showPrompt(title, defaultValue) {
+    function showPrompt(title, defaultValue, type) {
         defaultValue = defaultValue || '';
+        type = type || 'text';
         return new Promise(function(resolve) {
             document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-pen" style="color:#4299e1;"></i> <span>' + title + '</span>';
-            document.getElementById('appModalBody').innerHTML = '<input id="modalPromptInput" type="text" value="' + defaultValue.replace(/"/g,'&quot;') + '" style="width:100%;padding:8px 12px;font-size:14px;border:1px solid #e2e8f0;border-radius:6px;outline:none;" onkeydown="if(event.key===\'Enter\')document.getElementById(\'modalPromptOk\').click()">';
+            document.getElementById('appModalBody').innerHTML = '<input id="modalPromptInput" type="' + type + '" value="' + defaultValue.replace(/"/g,'&quot;') + '" style="width:100%;padding:8px 12px;font-size:14px;border:1px solid #e2e8f0;border-radius:6px;outline:none;" onkeydown="if(event.key===\'Enter\')document.getElementById(\'modalPromptOk\').click()">';
             document.getElementById('appModalFooter').innerHTML =
                 '<button class="btn btn-secondary" id="modalPromptCancel">取消</button>' +
                 '<button class="btn btn-primary" id="modalPromptOk">确认</button>';
@@ -246,8 +261,51 @@
                 loadClasses();
                 clearCanvas();
                 renderAnnotationList();
+                checkDatasetLockStatus();
             }
         }).catch(function(err) { console.error(err); });
+    }
+
+    // ========== 训练锁状态 ==========
+    var datasetLocked = false;
+
+    function checkDatasetLockStatus() {
+        fetch('/api/training/global-status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var currentDs = document.getElementById('datasetSelect').value;
+            if (data.busy && data.dataset_name && currentDs === data.dataset_name) {
+                if (!datasetLocked) { datasetLocked = true; updateLockUI(); }
+            } else {
+                if (datasetLocked) { datasetLocked = false; updateLockUI(); }
+            }
+        }).catch(function() {});
+    }
+
+    function updateLockUI() {
+        var banner = document.getElementById('datasetLockBanner');
+        var zipBtn = document.querySelector('button[onclick*="zipFileInput"]');
+        var addBtn = document.querySelector('button[onclick*="addImageInput"]');
+        var delBtn = document.querySelector('button[onclick*="deleteCurrentImage"]');
+        var drawTools = document.querySelectorAll('.tool-btn');
+        var lockText = document.getElementById('lockBannerText');
+        var currentDs = document.getElementById('datasetSelect').value;
+
+        if (datasetLocked && currentDs) {
+            if (banner) { banner.style.display = 'block'; lockText.textContent = '数据集 ' + currentDs + ' 正在训练中，标注功能已锁定'; }
+            if (zipBtn) zipBtn.disabled = true;
+            if (addBtn) addBtn.disabled = true;
+            if (delBtn) delBtn.disabled = true;
+            drawTools.forEach(function(b) { if (b.dataset.tool === 'draw') b.disabled = true; });
+            document.getElementById('datasetSelect').style.background = '#fef3c7';
+        } else {
+            if (banner) banner.style.display = 'none';
+            if (zipBtn) zipBtn.disabled = false;
+            if (addBtn) addBtn.disabled = false;
+            if (delBtn) delBtn.disabled = false;
+            drawTools.forEach(function(b) { b.disabled = false; });
+            document.getElementById('datasetSelect').style.background = '';
+        }
     }
 
     function uploadDatasetZip(files) {
@@ -259,17 +317,46 @@
         var formData = new FormData();
         formData.append('file', file);
 
-        fetch('/api/annotation/dataset/upload', { method: 'POST', body: formData })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                document.getElementById('datasetSelect').value = data.dataset;
-                onDatasetChange();
-                showAlert(data.message, '成功');
-            } else {
-                showAlert(data.error, '上传失败');
+        var overlay = document.getElementById('uploadOverlay');
+        var progressBar = document.getElementById('uploadProgressBar');
+        var percentEl = document.getElementById('uploadPercent');
+        overlay.classList.add('active');
+        progressBar.style.width = '0%';
+        percentEl.textContent = '0%';
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/annotation/dataset/upload');
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                var pct = Math.round(e.loaded / e.total * 100);
+                progressBar.style.width = pct + '%';
+                percentEl.textContent = pct + '%';
             }
-        }).catch(function(err) { showAlert(err.message, '上传失败'); });
+        };
+
+        xhr.onload = function() {
+            overlay.classList.remove('active');
+            try {
+                var data = JSON.parse(xhr.responseText);
+                if (data.success) {
+                    document.getElementById('datasetSelect').value = data.dataset;
+                    onDatasetChange();
+                    showAlert(data.message, '成功');
+                } else {
+                    showAlert(data.error, '上传失败');
+                }
+            } catch(e) {
+                showAlert('上传失败', '错误');
+            }
+        };
+
+        xhr.onerror = function() {
+            overlay.classList.remove('active');
+            showAlert('网络错误，上传失败', '上传失败');
+        };
+
+        xhr.send(formData);
     }
 
     function addImagesToDataset(files) {
@@ -458,16 +545,30 @@
             if (filterName && ann.class !== filterName) return;
             var pts = ann.points;
             if (pts.length < 2) return;
-            var x1 = pts[0].x * canvasScale + canvasOffsetX;
-            var y1 = pts[0].y * canvasScale + canvasOffsetY;
-            var x2 = pts[2].x * canvasScale + canvasOffsetX;
-            var y2 = pts[2].y * canvasScale + canvasOffsetY;
+
+            var bounds = computeBounds(pts);
+            var x1 = bounds.minX * canvasScale + canvasOffsetX;
+            var y1 = bounds.minY * canvasScale + canvasOffsetY;
+            var x2 = bounds.maxX * canvasScale + canvasOffsetX;
+            var y2 = bounds.maxY * canvasScale + canvasOffsetY;
             var w = x2 - x1, h = y2 - y1;
 
             var isSel = selectedAnnotation === idx;
             ctx.strokeStyle = ann.color || '#3B82F6';
             ctx.lineWidth = isSel ? 3 : 2;
-            ctx.strokeRect(x1, y1, w, h);
+
+            if (isRectAnnotation(ann)) {
+                ctx.strokeRect(x1, y1, w, h);
+            } else {
+                // 多边形：画路径
+                ctx.beginPath();
+                ctx.moveTo(pts[0].x * canvasScale + canvasOffsetX, pts[0].y * canvasScale + canvasOffsetY);
+                for (var k = 1; k < pts.length; k++) {
+                    ctx.lineTo(pts[k].x * canvasScale + canvasOffsetX, pts[k].y * canvasScale + canvasOffsetY);
+                }
+                ctx.closePath();
+                ctx.stroke();
+            }
 
             var label = ann.class + (ann.confidence ? ' ' + (ann.confidence*100).toFixed(0)+'%' : '');
             ctx.fillStyle = ann.color || '#3B82F6';
@@ -479,7 +580,7 @@
             ctx.fillStyle = '#fff';
             ctx.fillText(label, x1 + 3, ly + 12);
 
-            if (isSel) {
+            if (isSel && isRectAnnotation(ann)) {
                 ctx.fillStyle = '#fff';
                 ctx.strokeStyle = '#3B82F6';
                 ctx.lineWidth = 1;
@@ -502,15 +603,31 @@
         return { x: ix * canvasScale + canvasOffsetX, y: iy * canvasScale + canvasOffsetY };
     }
 
+    function computeBounds(pts) {
+        var xs = pts.map(function(p) { return p.x; });
+        var ys = pts.map(function(p) { return p.y; });
+        return {
+            minX: Math.min.apply(null, xs), minY: Math.min.apply(null, ys),
+            maxX: Math.max.apply(null, xs), maxY: Math.max.apply(null, ys)
+        };
+    }
+
+    function isRectAnnotation(ann) {
+        return (ann.type === 'rectangle') || (!ann.type && ann.points && ann.points.length === 4);
+    }
+
     function getHandleAt(cx, cy) {
         if (selectedAnnotation === null) return null;
         var ann = annotations[selectedAnnotation];
         var pts = ann.points;
         if (pts.length < 2) return null;
-        var x1 = pts[0].x * canvasScale + canvasOffsetX;
-        var y1 = pts[0].y * canvasScale + canvasOffsetY;
-        var x2 = pts[2].x * canvasScale + canvasOffsetX;
-        var y2 = pts[2].y * canvasScale + canvasOffsetY;
+        // 多边形不显示 resize 手柄
+        if (!isRectAnnotation(ann)) return null;
+        var bounds = computeBounds(pts);
+        var x1 = bounds.minX * canvasScale + canvasOffsetX;
+        var y1 = bounds.minY * canvasScale + canvasOffsetY;
+        var x2 = bounds.maxX * canvasScale + canvasOffsetX;
+        var y2 = bounds.maxY * canvasScale + canvasOffsetY;
         var w = x2 - x1, h = y2 - y1;
         var handles = {
             'nw': [x1, y1], 'ne': [x2, y1], 'sw': [x1, y2], 'se': [x2, y2],
@@ -527,16 +644,18 @@
         for (var i = annotations.length - 1; i >= 0; i--) {
             var pts = annotations[i].points;
             if (pts.length < 2) continue;
-            var x1 = pts[0].x * canvasScale + canvasOffsetX;
-            var y1 = pts[0].y * canvasScale + canvasOffsetY;
-            var x2 = pts[2].x * canvasScale + canvasOffsetX;
-            var y2 = pts[2].y * canvasScale + canvasOffsetY;
+            var bounds = computeBounds(pts);
+            var x1 = bounds.minX * canvasScale + canvasOffsetX;
+            var y1 = bounds.minY * canvasScale + canvasOffsetY;
+            var x2 = bounds.maxX * canvasScale + canvasOffsetX;
+            var y2 = bounds.maxY * canvasScale + canvasOffsetY;
             if (cx >= x1 && cx <= x2 && cy >= y1 && cy <= y2) return i;
         }
         return -1;
     }
 
     canvas.addEventListener('mousedown', function(e) {
+        if (datasetLocked && currentTool === 'draw') return;
         var rect = canvas.getBoundingClientRect();
         var cx = e.clientX - rect.left, cy = e.clientY - rect.top;
         if (!img.src || !img.complete) return;
@@ -551,6 +670,7 @@
                 selectedAnnotation = idx;
                 dragMode = 'move';
                 dragStartPoints = JSON.parse(JSON.stringify(annotations[idx].points));
+                dragStartMouse = canvasToImage(cx, cy);
                 drawCanvas();
                 renderAnnotationList();
             } else {
@@ -597,19 +717,31 @@
             drawCanvas();
         } else if (dragMode === 'move' && selectedAnnotation !== null) {
             ip = canvasToImage(cx, cy);
-            var orig = dragStartPoints;
-            var ow = orig[2].x - orig[0].x, oh = orig[2].y - orig[0].y;
-            var nx = Math.max(0, Math.min(img.naturalWidth - ow, ip.x - ow/2));
-            var ny = Math.max(0, Math.min(img.naturalHeight - oh, ip.y - oh/2));
-            annotations[selectedAnnotation].points = [
-                {x: nx, y: ny}, {x: nx + ow, y: ny},
-                {x: nx + ow, y: ny + oh}, {x: nx, y: ny + oh}
-            ];
+            var ann = annotations[selectedAnnotation];
+            if (isRectAnnotation(ann) && dragStartPoints) {
+                var orig = dragStartPoints;
+                var bounds = computeBounds(orig);
+                var ow = bounds.maxX - bounds.minX, oh = bounds.maxY - bounds.minY;
+                var nx = Math.max(0, Math.min(img.naturalWidth - ow, ip.x - ow/2));
+                var ny = Math.max(0, Math.min(img.naturalHeight - oh, ip.y - oh/2));
+                ann.points = [
+                    {x: nx, y: ny}, {x: nx + ow, y: ny},
+                    {x: nx + ow, y: ny + oh}, {x: nx, y: ny + oh}
+                ];
+            } else if (dragStartPoints && dragStartMouse) {
+                // 多边形：平移所有点
+                var dx = ip.x - dragStartMouse.x;
+                var dy = ip.y - dragStartMouse.y;
+                ann.points = dragStartPoints.map(function(p) {
+                    return {x: p.x + dx, y: p.y + dy};
+                });
+            }
             drawCanvas();
         } else if (dragMode && dragMode.indexOf('resize-') === 0 && selectedAnnotation !== null) {
             ip = canvasToImage(cx, cy);
             var ann = annotations[selectedAnnotation];
-            var x1 = ann.points[0].x, y1 = ann.points[0].y, x2 = ann.points[2].x, y2 = ann.points[2].y;
+            var bounds = computeBounds(ann.points);
+            var x1 = bounds.minX, y1 = bounds.minY, x2 = bounds.maxX, y2 = bounds.maxY;
             if (dragMode.indexOf('e') >= 0) x2 = ip.x;
             if (dragMode.indexOf('w') >= 0) x1 = ip.x;
             if (dragMode.indexOf('s') >= 0) y2 = ip.y;
@@ -662,7 +794,7 @@
     function saveAnnotations() {
         if (!currentImage) return;
         var toSave = annotations.map(function(a) {
-            return {class: a.class, color: a.color, type: 'rectangle', points: a.points};
+            return {class: a.class, color: a.color, type: a.type || 'rectangle', points: a.points};
         });
         fetch('/api/annotation/dataset/annotations/' + encodeURIComponent(currentImage), {
             method: 'POST', headers: {'Content-Type':'application/json'},
@@ -961,6 +1093,8 @@
     document.addEventListener('DOMContentLoaded', function() {
         refreshDatasets();
         loadInferenceModels();
+        checkDatasetLockStatus();
+        setInterval(checkDatasetLockStatus, 5000);
     });
 </script>
 {% endblock %}

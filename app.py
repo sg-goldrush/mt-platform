@@ -487,6 +487,23 @@ def auth_logout():
     return jsonify({'success': True})
 
 
+@app.route('/api/auth/verify-password', methods=['POST'])
+@require_auth
+def auth_verify_password():
+    """验证当前用户密码（用于敏感操作确认）"""
+    data = request.json or {}
+    password = data.get('password', '')
+
+    username = get_current_user()
+    users = _load_users()
+    user = users.get(username, {})
+
+    if user.get('password') != password:
+        return jsonify({'success': False, 'error': '密码错误'}), 401
+
+    return jsonify({'success': True})
+
+
 @app.route('/api/auth/register', methods=['POST'])
 def auth_register():
     """用户注册 — 已停用，仅管理员可创建"""
@@ -1158,6 +1175,11 @@ def add_images_to_dataset():
         if not ds_name:
             return jsonify({'success': False, 'error': '请先上传或选择一个数据集'}), 400
 
+        # 检查数据集是否正在训练中
+        locked_ds = _get_training_locked_dataset()
+        if locked_ds and locked_ds == ds_name:
+            return jsonify({'success': False, 'error': f'数据集 {ds_name} 正在训练中，无法追加图片', 'locked': True}), 423
+
         images_dir = _get_dataset_images_dir(ds_name)
         os.makedirs(images_dir, exist_ok=True)
 
@@ -1399,6 +1421,11 @@ def save_dataset_annotations(image_name):
     ds_name = _get_active_dataset()
     if not ds_name:
         return jsonify({'error': 'No active dataset'}), 400
+
+    # 检查数据集是否正在训练中
+    locked_ds = _get_training_locked_dataset()
+    if locked_ds and locked_ds == ds_name:
+        return jsonify({'success': False, 'error': f'数据集 {ds_name} 正在训练中，无法修改标注', 'locked': True}), 423
 
     data = request.json or []
     labels_dir = _get_dataset_labels_dir(ds_name)
@@ -1662,6 +1689,11 @@ def delete_annotation_dataset():
     if not name:
         return jsonify({'success': False, 'error': '未指定数据集'}), 400
 
+    # 检查数据集是否正在训练中
+    locked_ds = _get_training_locked_dataset()
+    if locked_ds and locked_ds == name:
+        return jsonify({'success': False, 'error': f'数据集 {name} 正在训练中，无法删除', 'locked': True}), 423
+
     ds_dir = _get_dataset_dir(name)
     if not os.path.exists(ds_dir):
         return jsonify({'success': False, 'error': '数据集不存在'}), 404
@@ -1687,6 +1719,11 @@ def delete_dataset_image():
     ds_name = _get_active_dataset()
     if not ds_name:
         return jsonify({'success': False, 'error': '未选择数据集'}), 400
+
+    # 检查数据集是否正在训练中
+    locked_ds = _get_training_locked_dataset()
+    if locked_ds and locked_ds == ds_name:
+        return jsonify({'success': False, 'error': f'数据集 {ds_name} 正在训练中，无法删除图片', 'locked': True}), 423
 
     data = request.json or {}
     image_name = (data.get('image') or '').strip()
@@ -3783,6 +3820,15 @@ class TrainingTask:
 # 全局训练任务存储
 training_tasks = {}
 
+def _get_training_locked_dataset():
+    """返回正在训练中的数据集名称，没有则返回 None"""
+    for task_id, task in training_tasks.items():
+        if task.status == 'running':
+            ds_path = task.config.get('dataset', '')
+            if ds_path:
+                return os.path.basename(ds_path)
+    return None
+
 @app.route('/api/training/start', methods=['POST'])
 @require_auth
 def start_training():
@@ -4311,6 +4357,7 @@ def global_training_status():
     """全局训练状态 (所有用户可见)"""
     for task_id, task in training_tasks.items():
         if task.status == 'running':
+            ds_path = task.config.get('dataset', '')
             return jsonify({
                 'success': True,
                 'busy': True,
@@ -4318,9 +4365,10 @@ def global_training_status():
                 'task_id': task.task_id,
                 'current_epoch': task.current_epoch,
                 'total_epochs': task.total_epochs,
-                'progress': task.progress
+                'progress': task.progress,
+                'dataset_name': os.path.basename(ds_path) if ds_path else None
             })
-    return jsonify({'success': True, 'busy': False})
+    return jsonify({'success': True, 'busy': False, 'dataset_name': None})
 
 @app.route('/api/training/download/<task_id>')
 def download_trained_model(task_id):
@@ -4808,17 +4856,26 @@ def remove_dataset():
     """移除已上传的数据集"""
     import os
     import shutil
-    
+
     try:
         data = request.json
         dataset_path = data.get('dataset_path')
-        
+
         if not dataset_path:
             return jsonify({
                 'success': False,
                 'error': '未指定数据集路径'
             }), 400
-        
+
+        # 检查数据集是否正在训练中
+        locked_ds = _get_training_locked_dataset()
+        if locked_ds and locked_ds == os.path.basename(dataset_path):
+            return jsonify({
+                'success': False,
+                'error': f'数据集 {locked_ds} 正在训练中，无法删除',
+                'locked': True
+            }), 423
+
         # 安全检查：只允许删除 uploads/training_datasets 下的内容
         upload_dir = get_user_data_dir('training_datasets')
         real_path = os.path.realpath(dataset_path)

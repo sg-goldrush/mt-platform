@@ -13,3 +13,4 @@ __pycache__
 app/__pycache__
 static/storage
 /pre_models.DS_Store
+/pre_models/

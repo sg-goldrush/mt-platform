@@ -25,6 +25,14 @@
         </div>
     </div>
 
+    <!-- 上传遮罩 -->
+    <div class="upload-overlay" id="uploadOverlay">
+        <i class="fas fa-cloud-upload-alt upload-spinner"></i>
+        <div class="upload-text">正在上传数据集，请稍候...</div>
+        <div class="upload-progress"><div class="upload-progress-bar" id="uploadProgressBar"></div></div>
+        <div class="upload-percent" id="uploadPercent">0%</div>
+    </div>
+
     <!-- 登录 Modal -->
     <div class="modal" id="loginModal" onclick="if(event.target===this)closeLoginModal()">
         <div class="modal-content login-modal-content">
@@ -592,6 +600,7 @@
         });
 
         // 全局训练状态
+        var trainingLockedDataset = null;
         function checkGlobalTrainingStatus() {
             fetch('/api/training/global-status')
             .then(res => res.json())
@@ -602,6 +611,7 @@
                     badge.style.background = '#fef3c7';
                     badge.style.color = '#92400e';
                     badge.innerHTML = '<i class="fas fa-spinner fa-spin"></i> ' + data.username + ' 训练中 ' + data.current_epoch + '/' + data.total_epochs;
+                    trainingLockedDataset = data.dataset_name || null;
                     // 禁用开始按钮
                     const startBtn = document.getElementById('startTrainingBtn');
                     if (startBtn) startBtn.disabled = true;
@@ -609,8 +619,10 @@
                     badge.style.background = '#d1fae5';
                     badge.style.color = '#065f46';
                     badge.innerHTML = '<i class="fas fa-check-circle"></i> 空闲';
+                    trainingLockedDataset = null;
                     refreshOperationButtons();
                 }
+                renderDatasetList();
             }).catch(() => {});
         }
 
@@ -831,9 +843,14 @@
                         <button onclick="event.stopPropagation(); downloadTrainingDataset('${dataset.name}')" title="下载" style="background:none;border:none;color:#4299e1;cursor:pointer;font-size:13px;">
                             <i class="fas fa-download"></i>
                         </button>
-                        <button class="btn-delete" onclick="event.stopPropagation(); deleteDataset(${index})" title="删除">
-                            <i class="fas fa-trash"></i>
-                        </button>
+                        ${trainingLockedDataset && trainingLockedDataset === dataset.name
+                            ? `<button class="btn-delete" disabled style="opacity:0.4;cursor:not-allowed;" title="训练中，无法删除">
+                                <i class="fas fa-lock"></i>
+                               </button>`
+                            : `<button class="btn-delete" onclick="event.stopPropagation(); deleteDataset(${index})" title="删除">
+                                <i class="fas fa-trash"></i>
+                               </button>`
+                        }
                     </div>
                 </div>
             `).join('');
@@ -860,8 +877,26 @@
                 return;
             }
             const dataset = uploadedDatasets[index];
-            const ok = await showConfirm(`确定要删除数据集 <b>${dataset.name}</b> 吗？此操作不可恢复。`, '删除数据集', '删除', '取消');
+            const ok = await showConfirm(
+                `确定要删除数据集 <b>${dataset.name}</b> 吗？此操作不可恢复。`,
+                '删除数据集', '删除', '取消'
+            );
             if (!ok) return;
+
+            // 密码验证
+            const pwd = await showPrompt('请输入密码以确认删除', '', 'password');
+            if (!pwd) return;
+
+            const verify = await fetch('/api/auth/verify-password', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({password: pwd})
+            }).then(r => r.json());
+
+            if (!verify.success) {
+                showAlert(verify.error || '密码错误', '验证失败');
+                return;
+            }
 
             fetch('/api/training/remove-dataset', {
                 method: 'POST',
@@ -937,7 +972,6 @@
                 showAlert('存储空间已满，无法上传。请清理旧数据后重试。');
                 return;
             }
-            // 检查同名数据集
             const dsName = file.name.replace(/\.zip$/i, '');
             const existing = uploadedDatasets.find(d => d.name === dsName);
             if (existing) {
@@ -948,26 +982,49 @@
                 if (!ok) return;
             }
 
-            const formData = new FormData();
+            var formData = new FormData();
             formData.append('dataset', file);
 
-            fetch('/api/training/upload-dataset', {
-                method: 'POST',
-                body: formData
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    addLogLine(`数据集上传成功: ${file.name}`, 'success');
-                    loadUploadedDatasets();
-                    loadStorageUsage();
-                } else {
-                    showAlert(data.error, '上传失败');
+            var overlay = document.getElementById('uploadOverlay');
+            var progressBar = document.getElementById('uploadProgressBar');
+            var percentEl = document.getElementById('uploadPercent');
+            overlay.classList.add('active');
+            progressBar.style.width = '0%';
+            percentEl.textContent = '0%';
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/training/upload-dataset');
+
+            xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    var pct = Math.round(e.loaded / e.total * 100);
+                    progressBar.style.width = pct + '%';
+                    percentEl.textContent = pct + '%';
                 }
-            })
-            .catch(err => {
-                showAlert(err.message, '上传失败');
-            });
+            };
+
+            xhr.onload = function() {
+                overlay.classList.remove('active');
+                try {
+                    var data = JSON.parse(xhr.responseText);
+                    if (data.success) {
+                        addLogLine(`数据集上传成功: ${file.name}`, 'success');
+                        loadUploadedDatasets();
+                        loadStorageUsage();
+                    } else {
+                        showAlert(data.error, '上传失败');
+                    }
+                } catch(e) {
+                    showAlert('上传失败', '错误');
+                }
+            };
+
+            xhr.onerror = function() {
+                overlay.classList.remove('active');
+                showAlert('网络错误，上传失败', '上传失败');
+            };
+
+            xhr.send(formData);
         }
 
         // 开始训练
@@ -1207,10 +1264,10 @@
             });
         }
 
-        function showPrompt(title, defaultValue = '') {
+        function showPrompt(title, defaultValue = '', type = 'text') {
             return new Promise(resolve => {
                 document.getElementById('appModalTitle').innerHTML = '<i class="fas fa-pen" style="color:#4299e1;"></i> <span>' + title + '</span>';
-                document.getElementById('appModalBody').innerHTML = '<input id="modalPromptInput" type="text" value="' + defaultValue + '" style="width:100%;padding:8px 12px;font-size:14px;border:1px solid #e2e8f0;border-radius:6px;outline:none;" onkeydown="if(event.key===\'Enter\')document.getElementById(\'modalPromptOk\').click()">';
+                document.getElementById('appModalBody').innerHTML = '<input id="modalPromptInput" type="' + type + '" value="' + defaultValue + '" style="width:100%;padding:8px 12px;font-size:14px;border:1px solid #e2e8f0;border-radius:6px;outline:none;" onkeydown="if(event.key===\'Enter\')document.getElementById(\'modalPromptOk\').click()">';
                 document.getElementById('appModalFooter').innerHTML =
                     '<button class="btn btn-secondary" id="modalPromptCancel">取消</button>' +
                     '<button class="btn btn-primary" id="modalPromptOk">确认</button>';
