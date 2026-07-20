@@ -138,6 +138,7 @@
     var images = [];
     var currentImage = null;
     var annotations = [];
+    var isUploading = false;
     var classes = [];
     var selectedAnnotation = null;
     var canvasScale = 1;
@@ -337,6 +338,7 @@
 
         xhr.onload = function() {
             overlay.classList.remove('active');
+            isUploading = false;
             try {
                 var data = JSON.parse(xhr.responseText);
                 if (data.success) {
@@ -353,9 +355,11 @@
 
         xhr.onerror = function() {
             overlay.classList.remove('active');
+            isUploading = false;
             showAlert('网络错误，上传失败', '上传失败');
         };
 
+        isUploading = true;
         xhr.send(formData);
     }
 
@@ -679,6 +683,22 @@
                 renderAnnotationList();
             }
         } else if (currentTool === 'draw') {
+            // 先检测是否点击了已有标注框，如果是则转为选择/拖拽
+            if (selectedAnnotation !== null) {
+                var handle = getHandleAt(cx, cy);
+                if (handle) { dragMode = 'resize-' + handle; return; }
+            }
+            var hitIdx = findAnnotationAt(cx, cy);
+            if (hitIdx >= 0) {
+                selectedAnnotation = hitIdx;
+                dragMode = 'move';
+                dragStartPoints = JSON.parse(JSON.stringify(annotations[hitIdx].points));
+                dragStartMouse = canvasToImage(cx, cy);
+                drawCanvas();
+                renderAnnotationList();
+                return;
+            }
+
             if (selectedClassIdx === null || selectedClassIdx >= classes.length) {
                 showAlert('请先在右侧选择一个类别，再画框');
                 return;
@@ -742,10 +762,11 @@
             var ann = annotations[selectedAnnotation];
             var bounds = computeBounds(ann.points);
             var x1 = bounds.minX, y1 = bounds.minY, x2 = bounds.maxX, y2 = bounds.maxY;
-            if (dragMode.indexOf('e') >= 0) x2 = ip.x;
-            if (dragMode.indexOf('w') >= 0) x1 = ip.x;
-            if (dragMode.indexOf('s') >= 0) y2 = ip.y;
-            if (dragMode.indexOf('n') >= 0) y1 = ip.y;
+            var dir = dragMode.split('-')[1];
+            if (dir.indexOf('e') >= 0) x2 = ip.x;
+            if (dir.indexOf('w') >= 0) x1 = ip.x;
+            if (dir.indexOf('s') >= 0) y2 = ip.y;
+            if (dir.indexOf('n') >= 0) y1 = ip.y;
             if (x2 < x1) { var t = x1; x1 = x2; x2 = t; }
             if (y2 < y1) { t = y1; y1 = y2; y2 = t; }
             ann.points = [{x: x1, y: y1}, {x: x2, y: y1}, {x: x2, y: y2}, {x: x1, y: y2}];
@@ -1095,6 +1116,14 @@
         loadInferenceModels();
         checkDatasetLockStatus();
         setInterval(checkDatasetLockStatus, 5000);
+
+        window.addEventListener('beforeunload', function(e) {
+            if (isUploading) {
+                e.preventDefault();
+                e.returnValue = '文件正在上传中，离开页面将中断上传';
+                return e.returnValue;
+            }
+        });
     });
 </script>
 {% endblock %}

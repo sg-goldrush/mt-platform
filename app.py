@@ -487,21 +487,6 @@ def auth_logout():
     return jsonify({'success': True})
 
 
-@app.route('/api/auth/verify-password', methods=['POST'])
-@require_auth
-def auth_verify_password():
-    """验证当前用户密码（用于敏感操作确认）"""
-    data = request.json or {}
-    password = data.get('password', '')
-
-    username = get_current_user()
-    users = _load_users()
-    user = users.get(username, {})
-
-    if user.get('password') != password:
-        return jsonify({'success': False, 'error': '密码错误'}), 401
-
-    return jsonify({'success': True})
 
 
 @app.route('/api/auth/register', methods=['POST'])
@@ -834,6 +819,23 @@ def require_auth(f):
     return decorated
 
 
+@app.route('/api/auth/verify-password', methods=['POST'])
+@require_auth
+def auth_verify_password():
+    """验证当前用户密码（用于敏感操作确认）"""
+    data = request.json or {}
+    password = data.get('password', '')
+
+    username = get_current_user()
+    users = _load_users()
+    user = users.get(username, {})
+
+    if user.get('password') != password:
+        return jsonify({'success': False, 'error': '密码错误'}), 401
+
+    return jsonify({'success': True})
+
+
 @app.route('/')
 def index():
     """主页 — 模型训练"""
@@ -1143,6 +1145,26 @@ def upload_dataset_zip():
 
         if count == 0:
             return jsonify({'success': False, 'error': 'ZIP 中未找到图片文件，请确认 ZIP 内包含 jpg/png 等格式图片'}), 400
+
+        # 如果 ZIP 中没有 data.yaml，自动生成一个（训练面板依赖此文件）
+        ds_dir = _get_dataset_dir(ds_name)
+        yaml_path = os.path.join(ds_dir, 'data.yaml')
+        if not os.path.exists(yaml_path):
+            try:
+                import yaml
+            except ImportError:
+                yaml = None
+            classes = _load_dataset_classes(ds_name)
+            names = [c['name'] for c in classes] if classes else []
+            cfg = {'path': '.', 'train': 'images', 'val': 'images', 'test': 'images', 'nc': len(names), 'names': names}
+            if yaml:
+                with open(yaml_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+            else:
+                with open(yaml_path, 'w', encoding='utf-8') as f:
+                    f.write('# Auto-generated data.yaml\n')
+                    for k, v in cfg.items():
+                        f.write(f'{k}: {v}\n')
 
         # 设为活跃数据集
         username = get_current_user() or '_default'

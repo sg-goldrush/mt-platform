@@ -1313,7 +1313,6 @@ textarea { resize: vertical; min-height: 80px; }
 .upload-overlay .upload-spinner {
     font-size: 48px;
     color: var(--color-accent);
-    animation: spin 0.8s linear infinite;
 }
 .upload-overlay .upload-text {
     color: #fff;
