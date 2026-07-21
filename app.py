@@ -1827,6 +1827,120 @@ def delete_dataset_image():
     return jsonify({'success': True, 'message': f'已删除 {image_name}'})
 
 
+# ---- 数据集描述 ----
+
+@app.route('/api/annotation/dataset/description', methods=['GET'])
+def get_dataset_description():
+    """获取活跃数据集的描述"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': False, 'error': '未选择数据集'}), 400
+    desc_path = os.path.join(_get_dataset_dir(ds_name), 'description.txt')
+    desc = ''
+    if os.path.exists(desc_path):
+        try:
+            with open(desc_path, 'r', encoding='utf-8') as f:
+                desc = f.read()
+        except Exception:
+            desc = ''
+    return jsonify({'success': True, 'description': desc})
+
+
+@app.route('/api/annotation/dataset/description', methods=['POST'])
+@require_auth
+def save_dataset_description():
+    """保存活跃数据集的描述"""
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': False, 'error': '未选择数据集'}), 400
+    data = request.json or {}
+    desc = data.get('description', '')
+    desc_path = os.path.join(_get_dataset_dir(ds_name), 'description.txt')
+    with open(desc_path, 'w', encoding='utf-8') as f:
+        f.write(desc)
+    return jsonify({'success': True})
+
+
+# ---- 目标图库 ----
+
+@app.route('/api/annotation/dataset/objects')
+def get_dataset_objects():
+    """获取活跃数据集中所有目标 (裁剪用)"""
+    from PIL import Image
+    ds_name = _get_active_dataset()
+    if not ds_name:
+        return jsonify({'success': False, 'error': '未选择数据集'}), 400
+
+    labels_dir = _get_dataset_labels_dir(ds_name)
+    images_dir = _get_dataset_images_dir(ds_name)
+    classes = _load_dataset_classes(ds_name)
+
+    objects = []
+    if not os.path.isdir(labels_dir):
+        return jsonify({'success': True, 'objects': objects})
+
+    for lf in sorted(os.listdir(labels_dir)):
+        if not lf.endswith('.txt'):
+            continue
+        image_name = os.path.splitext(lf)[0]
+        # 尝试匹配图片扩展名
+        img_path = None
+        for ext in ('.jpg', '.jpeg', '.png', '.bmp', '.webp'):
+            candidate = os.path.join(images_dir, image_name + ext)
+            if os.path.exists(candidate):
+                img_path = candidate
+                break
+        if not img_path:
+            continue
+
+        try:
+            with Image.open(img_path) as img:
+                iw, ih = img.size
+        except Exception:
+            continue
+
+        label_path = os.path.join(labels_dir, lf)
+        try:
+            with open(label_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue
+                    cls_id = int(parts[0])
+                    coords = list(map(float, parts[1:]))
+
+                    if len(coords) == 4:
+                        # 标准 YOLO: cx cy w h
+                        cx, cy, w_n, h_n = coords
+                        x = int((cx - w_n / 2) * iw)
+                        y = int((cy - h_n / 2) * ih)
+                        bw = int(w_n * iw)
+                        bh = int(h_n * ih)
+                    else:
+                        # OBB/多边形: x1 y1 x2 y2 ... 计算 bounding box
+                        xs = [coords[i] * iw for i in range(0, len(coords), 2)]
+                        ys = [coords[i] * ih for i in range(1, len(coords), 2)]
+                        x = int(min(xs))
+                        y = int(min(ys))
+                        bw = int(max(xs) - min(xs))
+                        bh = int(max(ys) - min(ys))
+
+                    cls_name = classes[cls_id]['name'] if cls_id < len(classes) else f'class_{cls_id}'
+                    color = classes[cls_id]['color'] if cls_id < len(classes) else '#3B82F6'
+                    objects.append({
+                        'image': os.path.basename(img_path),
+                        'class': cls_name,
+                        'color': color,
+                        'x': x, 'y': y, 'w': bw, 'h': bh
+                    })
+        except Exception:
+            continue
+
+    # 按类别分组排序
+    objects.sort(key=lambda o: (o['class'], o['image']))
+    return jsonify({'success': True, 'objects': objects})
+
+
 # ---- 模型推理标注 ----
 
 @app.route('/api/annotation/inference-models')

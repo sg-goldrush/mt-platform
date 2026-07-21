@@ -24,6 +24,17 @@
     <div class="upload-percent" id="uploadPercent">0%</div>
 </div>
 
+<!-- 目标图库遮罩 -->
+<div class="gallery-overlay" id="galleryOverlay">
+    <div class="gallery-header">
+        <h2>目标图库</h2>
+        <div class="gallery-stats" id="galleryStats"></div>
+        <button class="gallery-close" onclick="closeObjectGallery()">&times;</button>
+    </div>
+    <div class="gallery-grid" id="galleryGrid" onscroll="onGalleryScroll()"></div>
+    <div class="gallery-loading" id="galleryLoading" style="display:none;">加载中...</div>
+</div>
+
 <div class="training-container">
     <header class="navbar">
         <div class="logo">
@@ -123,9 +134,23 @@
             </div>
 
             <!-- 标注列表 -->
-            <div style="padding:10px 14px;flex:1;overflow-y:auto;">
-                <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:6px;"><i class="fas fa-list"></i> 标注列表 <span id="annotationCount" style="color:#4299e1;">(0)</span></h4>
-                <div id="annotationList" style="font-size:11px;color:#94a3b8;">选择图片后查看标注</div>
+            <div style="flex:1;display:flex;flex-direction:column;min-height:0;">
+                <div style="padding:10px 14px 4px;flex:1;overflow-y:auto;">
+                    <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:6px;"><i class="fas fa-list"></i> 标注列表 <span id="annotationCount" style="color:#4299e1;">(0)</span></h4>
+                    <div id="annotationList" style="font-size:11px;color:#94a3b8;">选择图片后查看标注</div>
+                </div>
+                <!-- 数据集描述 -->
+                <div style="padding:8px 14px;border-top:1px solid #e2e8f0;">
+                    <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:4px;"><i class="fas fa-pen"></i> 数据集描述</h4>
+                    <textarea id="datasetDesc" placeholder="描述一下这个数据集..." style="width:100%;height:52px;font-size:11px;padding:4px 8px;border:1px solid #e2e8f0;border-radius:4px;resize:none;box-sizing:border-box;" oninput="onDescChange()"></textarea>
+                </div>
+                <!-- 目标图库 -->
+                <div style="padding:8px 14px;border-top:1px solid #e2e8f0;">
+                    <h4 style="font-size:12px;font-weight:600;color:#2d3748;margin-bottom:4px;"><i class="fas fa-images"></i> 目标图库</h4>
+                    <button class="btn btn-secondary btn-sm" onclick="openObjectGallery()" style="width:100%;font-size:11px;">
+                        <i class="fas fa-eye"></i> 查看所有裁剪目标
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -262,6 +287,7 @@
                 loadClasses();
                 clearCanvas();
                 renderAnnotationList();
+                loadDescription();
                 checkDatasetLockStatus();
             }
         }).catch(function(err) { console.error(err); });
@@ -299,6 +325,8 @@
             if (delBtn) delBtn.disabled = true;
             drawTools.forEach(function(b) { if (b.dataset.tool === 'draw') b.disabled = true; });
             document.getElementById('datasetSelect').style.background = '#fef3c7';
+            var descEl = document.getElementById('datasetDesc');
+            if (descEl) descEl.disabled = true;
         } else {
             if (banner) banner.style.display = 'none';
             if (zipBtn) zipBtn.disabled = false;
@@ -306,8 +334,214 @@
             if (delBtn) delBtn.disabled = false;
             drawTools.forEach(function(b) { b.disabled = false; });
             document.getElementById('datasetSelect').style.background = '';
+            var descEl2 = document.getElementById('datasetDesc');
+            if (descEl2) descEl2.disabled = false;
         }
     }
+
+    // ========== 数据集描述 ==========
+    var descTimer = null;
+    function loadDescription() {
+        fetch('/api/annotation/dataset/description')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('datasetDesc').value = data.description || '';
+        }).catch(function() {});
+    }
+    function onDescChange() {
+        clearTimeout(descTimer);
+        descTimer = setTimeout(function() {
+            var ds = document.getElementById('datasetSelect').value;
+            if (!ds) return;
+            fetch('/api/annotation/dataset/description', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({description: document.getElementById('datasetDesc').value})
+            });
+        }, 2000);
+    }
+
+    // ========== 目标图库 ==========
+    var galleryObjects = [];
+    var galleryByClass = [];
+    var galleryFilterClass = null;  // null = 全部
+    var GALLERY_BATCH = 27;
+
+    function openObjectGallery() {
+        var ds = document.getElementById('datasetSelect').value;
+        if (!ds) { showAlert('请先选择数据集'); return; }
+
+        document.getElementById('galleryOverlay').classList.add('active');
+        document.getElementById('galleryGrid').innerHTML = '<div class="gallery-loading">加载目标数据...</div>';
+        document.getElementById('galleryStats').innerHTML = '';
+        galleryObjects = [];
+        galleryByClass = [];
+        galleryFilterClass = null;
+
+        fetch('/api/annotation/dataset/objects')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            galleryObjects = data.objects || [];
+            // 按类别分组
+            var cur = null;
+            for (var i = 0; i < galleryObjects.length; i++) {
+                var o = galleryObjects[i];
+                if (!cur || o.class !== cur.name) {
+                    cur = {name: o.class, color: o.color, items: [], rendered: 0};
+                    galleryByClass.push(cur);
+                }
+                cur.items.push(o);
+            }
+            renderGalleryTabs();
+            // 默认选中第一个类别
+            if (galleryByClass.length > 0) {
+                filterGallery(galleryByClass[0].name);
+            }
+        }).catch(function(err) {
+            document.getElementById('galleryGrid').innerHTML = '<div class="gallery-loading">加载失败</div>';
+        });
+    }
+
+    function closeObjectGallery() {
+        document.getElementById('galleryOverlay').classList.remove('active');
+    }
+
+    function renderGalleryTabs() {
+        var html = '';
+        for (var c = 0; c < galleryByClass.length; c++) {
+            var cls = galleryByClass[c];
+            html += '<span class="gallery-tab' + (galleryFilterClass === cls.name ? ' active' : '') + '" data-filter="' + cls.name + '" style="border-left:3px solid ' + cls.color + ';">' + cls.name + ' <b>' + cls.items.length + '</b></span>';
+        }
+        document.getElementById('galleryStats').innerHTML = html;
+        // 点击标签切换
+        var tabs = document.querySelectorAll('.gallery-tab');
+        for (var t = 0; t < tabs.length; t++) {
+            tabs[t].addEventListener('click', function() {
+                var f = this.getAttribute('data-filter');
+                filterGallery(f || null);
+            });
+        }
+    }
+
+    function filterGallery(className) {
+        galleryFilterClass = className;
+        renderGalleryTabs();
+        document.getElementById('galleryGrid').innerHTML = '';
+
+        if (className === null) {
+            // 全部：每类先展示 9 个
+            for (var c = 0; c < galleryByClass.length; c++) {
+                galleryByClass[c].rendered = 0;
+                renderClassHeader(galleryByClass[c]);
+                renderClassBatch(galleryByClass[c], 9);
+            }
+        } else {
+            // 单个类：展示全部（分批）
+            for (var c = 0; c < galleryByClass.length; c++) {
+                if (galleryByClass[c].name === className) {
+                    galleryByClass[c].rendered = 0;
+                    renderClassBatch(galleryByClass[c], GALLERY_BATCH);
+                    break;
+                }
+            }
+        }
+        setTimeout(cropVisibleGallery, 50);
+    }
+
+    function renderClassHeader(cls) {
+        var grid = document.getElementById('galleryGrid');
+        var hdr = document.createElement('div');
+        hdr.className = 'gallery-class-header';
+        hdr.innerHTML = '<span class="class-dot" style="background:' + cls.color + ';"></span>' + cls.name + ' (' + cls.items.length + '个)';
+        grid.appendChild(hdr);
+    }
+
+    function renderClassBatch(cls, count) {
+        var grid = document.getElementById('galleryGrid');
+        var end = Math.min(cls.rendered + count, cls.items.length);
+        for (var i = cls.rendered; i < end; i++) {
+            var obj = cls.items[i];
+            var item = document.createElement('div');
+            item.className = 'gallery-item';
+            item.innerHTML = '<canvas class="gallery-crop" data-image="' + obj.image +
+                '" data-x="' + obj.x + '" data-y="' + obj.y +
+                '" data-w="' + obj.w + '" data-h="' + obj.h + '"></canvas>';
+            grid.appendChild(item);
+        }
+        cls.rendered = end;
+    }
+
+    function onGalleryScroll() {
+        var grid = document.getElementById('galleryGrid');
+        if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 300) {
+            if (galleryFilterClass === null) {
+                // 全部模式：每类加载一批
+                for (var c = 0; c < galleryByClass.length; c++) {
+                    var cls = galleryByClass[c];
+                    if (cls.rendered < cls.items.length) {
+                        renderClassBatch(cls, 9);
+                    }
+                }
+            } else {
+                // 单类模式：只加载该类
+                for (var c = 0; c < galleryByClass.length; c++) {
+                    var cls = galleryByClass[c];
+                    if (cls.name === galleryFilterClass && cls.rendered < cls.items.length) {
+                        renderClassBatch(cls, GALLERY_BATCH);
+                        break;
+                    }
+                }
+            }
+            setTimeout(cropVisibleGallery, 50);
+        }
+    }
+
+    var GALLERY_MAX_SIZE = 200;
+    var galleryImageCache = {};
+    function cropVisibleGallery() {
+        var canvases = document.querySelectorAll('.gallery-crop:not(.cropped)');
+        canvases.forEach(function(canvas) {
+            canvas.classList.add('cropped');
+            var imgName = canvas.dataset.image;
+            var x = parseInt(canvas.dataset.x);
+            var y = parseInt(canvas.dataset.y);
+            var w = parseInt(canvas.dataset.w);
+            var h = parseInt(canvas.dataset.h);
+            if (w <= 0 || h <= 0) return;
+
+            var scale = Math.min(1, GALLERY_MAX_SIZE / Math.max(w, h));
+            var tw = Math.round(w * scale);
+            var th = Math.round(h * scale);
+            canvas.width = tw;
+            canvas.height = th;
+            canvas.style.width = tw + 'px';
+            canvas.style.height = th + 'px';
+            var ctx = canvas.getContext('2d');
+
+            function drawCrop(img) {
+                ctx.drawImage(img, x, y, w, h, 0, 0, tw, th);
+            }
+
+            if (galleryImageCache[imgName]) {
+                drawCrop(galleryImageCache[imgName]);
+            } else {
+                var img = new Image();
+                img.onload = function() {
+                    galleryImageCache[imgName] = img;
+                    drawCrop(img);
+                };
+                img.src = '/api/annotation/dataset/image/' + encodeURIComponent(imgName);
+            }
+        });
+    }
+
+
+    // ESC 关闭图库
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && document.getElementById('galleryOverlay').classList.contains('active')) {
+            closeObjectGallery();
+        }
+    });
 
     function uploadDatasetZip(files) {
         if (!files || files.length === 0) return;
