@@ -641,6 +641,50 @@
             updateOperationButtons();
         }
 
+        // 训练配置锁定/解锁
+        var TRAINING_CONFIG_IDS = ['modelSelect', 'deviceSelect', 'epochs', 'batchSize',
+            'imageSize', 'learningRate', 'optimizer', 'autoResume', 'savePeriod', 'valPeriod'];
+
+        function lockTrainingConfig() {
+            TRAINING_CONFIG_IDS.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) el.disabled = true;
+            });
+            // 禁用模型刷新按钮
+            var refreshBtn = document.querySelector('button[onclick*="refreshModels"]');
+            if (refreshBtn) refreshBtn.disabled = true;
+            // 禁用数据集选择
+            disableDatasetSelection();
+        }
+
+        function unlockTrainingConfig() {
+            TRAINING_CONFIG_IDS.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) el.disabled = false;
+            });
+            var refreshBtn = document.querySelector('button[onclick*="refreshModels"]');
+            if (refreshBtn) refreshBtn.disabled = false;
+            enableDatasetSelection();
+        }
+
+        function disableDatasetSelection() {
+            var dsList = document.getElementById('datasetList');
+            if (dsList) dsList.style.pointerEvents = 'none';
+            var uploadZone = document.getElementById('datasetUploadZone');
+            if (uploadZone) { uploadZone.style.pointerEvents = 'none'; uploadZone.style.opacity = '0.5'; }
+            var dsFileInput = document.getElementById('datasetFileInput');
+            if (dsFileInput) dsFileInput.disabled = true;
+        }
+
+        function enableDatasetSelection() {
+            var dsList = document.getElementById('datasetList');
+            if (dsList) dsList.style.pointerEvents = '';
+            var uploadZone = document.getElementById('datasetUploadZone');
+            if (uploadZone) { uploadZone.style.pointerEvents = ''; uploadZone.style.opacity = ''; }
+            var dsFileInput = document.getElementById('datasetFileInput');
+            if (dsFileInput) dsFileInput.disabled = false;
+        }
+
         let quotaExceeded = false;
 
         function loadStorageUsage() {
@@ -728,7 +772,7 @@
                         }
                         updateTrainingStatus('running', '训练进行中...');
                         document.getElementById('startTrainingBtn').disabled = true;
-                        // 只有登录用户才能操作停止按钮
+                        lockTrainingConfig();
                         if (currentUser) {
                             document.getElementById('stopTrainingBtn').disabled = false;
                         }
@@ -1088,6 +1132,7 @@
                     updateTrainingStatus('running', '训练进行中...');
                     document.getElementById('startTrainingBtn').disabled = true;
                     document.getElementById('stopTrainingBtn').disabled = false;
+                    lockTrainingConfig();
                     // 训练中取消数据集选中，防止误操作
                     uploadedDatasetPath = null;
                     renderDatasetList();
@@ -1130,6 +1175,7 @@
                     updateTrainingStatus('completed', '训练已停止');
                     document.getElementById('startTrainingBtn').disabled = false;
                     document.getElementById('stopTrainingBtn').disabled = true;
+                    unlockTrainingConfig();
                     addLogLine('训练已停止', 'warning');
                 }
             });
@@ -1165,6 +1211,7 @@
             if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
             updateTrainingStatus('completed', '训练完成！');
             document.getElementById('stopTrainingBtn').disabled = true;
+            unlockTrainingConfig();
             refreshOperationButtons();
 
             addLogLine('训练完成！', 'success');
@@ -1177,6 +1224,7 @@
             if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
             updateTrainingStatus('error', '训练出错');
             document.getElementById('stopTrainingBtn').disabled = true;
+            unlockTrainingConfig();
             refreshOperationButtons();
             addLogLine('错误: ' + data.error, 'error');
         }

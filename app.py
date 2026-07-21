@@ -1154,8 +1154,38 @@ def upload_dataset_zip():
                 import yaml
             except ImportError:
                 yaml = None
+
+            # 从 label 文件中扫描实际使用的 class ID
+            label_class_ids = set()
+            labels_dir = _get_dataset_labels_dir(ds_name)
+            if os.path.isdir(labels_dir):
+                for lf in os.listdir(labels_dir):
+                    if not lf.endswith('.txt'):
+                        continue
+                    try:
+                        with open(os.path.join(labels_dir, lf), 'r') as lf_handle:
+                            for line in lf_handle:
+                                parts = line.strip().split()
+                                if parts:
+                                    label_class_ids.add(int(parts[0]))
+                    except Exception:
+                        pass
+
+            # 尝试从 classes.json 获取名称映射，否则用数字占位
             classes = _load_dataset_classes(ds_name)
-            names = [c['name'] for c in classes] if classes else []
+            class_map = {c.get('id', i): c['name'] for i, c in enumerate(classes)} if classes else {}
+
+            max_id = max(label_class_ids) if label_class_ids else -1
+            names = []
+            for i in range(max_id + 1):
+                if i in label_class_ids:
+                    names.append(class_map.get(i, f'class_{i}'))
+                else:
+                    names.append(f'class_{i}')  # YOLO 要求连续索引
+
+            if not names:
+                names = ['object']  # fallback
+
             cfg = {'path': '.', 'train': 'images', 'val': 'images', 'test': 'images', 'nc': len(names), 'names': names}
             if yaml:
                 with open(yaml_path, 'w', encoding='utf-8') as f:
@@ -1640,6 +1670,33 @@ def _save_dataset_classes(ds_name, classes):
     path = os.path.join(_get_dataset_dir(ds_name), 'classes.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(classes, f, indent=2, ensure_ascii=False)
+
+    # 同步更新 data.yaml 的 names/nc，保证训练时类别一致
+    _sync_data_yaml_names(ds_name, classes)
+
+
+def _sync_data_yaml_names(ds_name, classes):
+    """根据 classes.json 更新 data.yaml 中的 names 和 nc"""
+    ds_dir = _get_dataset_dir(ds_name)
+    yaml_path = os.path.join(ds_dir, 'data.yaml')
+    if not os.path.exists(yaml_path):
+        return
+
+    names = [c['name'] for c in classes]
+    try:
+        import yaml
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        cfg = {}
+    cfg['names'] = names
+    cfg['nc'] = len(names)
+    try:
+        import yaml
+        with open(yaml_path, 'w', encoding='utf-8') as f:
+            yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    except Exception:
+        pass
 
 
 # ---- 数据集下载 ----

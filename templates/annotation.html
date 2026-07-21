@@ -369,27 +369,59 @@
         if (!ds) { showAlert('请先选择数据集'); return; }
 
         var formData = new FormData();
-        var hasZip = false;
+        var totalSize = 0;
         for (var i = 0; i < files.length; i++) {
             var f = files[i];
+            totalSize += f.size;
             if (f.name.toLowerCase().endsWith('.zip')) {
                 formData.append('zip', f);
-                hasZip = true;
             } else if (f.type.startsWith('image/')) {
                 formData.append('images', f);
             }
         }
 
-        fetch('/api/annotation/dataset/add-images', { method: 'POST', body: formData })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                loadImages();
-                showAlert(data.message, '成功');
-            } else {
-                showAlert(data.error, '失败');
+        var overlay = document.getElementById('uploadOverlay');
+        var progressBar = document.getElementById('uploadProgressBar');
+        var percentEl = document.getElementById('uploadPercent');
+        overlay.classList.add('active');
+        progressBar.style.width = '0%';
+        percentEl.textContent = '0%';
+
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/annotation/dataset/add-images');
+
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                var pct = Math.round(e.loaded / e.total * 100);
+                progressBar.style.width = pct + '%';
+                percentEl.textContent = pct + '%';
             }
-        }).catch(function(err) { showAlert(err.message, '失败'); });
+        };
+
+        xhr.onload = function() {
+            overlay.classList.remove('active');
+            isUploading = false;
+            try {
+                var data = JSON.parse(xhr.responseText);
+                if (data.success) {
+                    loadImages();
+                    showAlert(data.message, '成功');
+                } else {
+                    showAlert(data.error, '失败');
+                }
+            } catch(e) {
+                showAlert('上传失败', '错误');
+            }
+        };
+
+        xhr.onerror = function() {
+            overlay.classList.remove('active');
+            isUploading = false;
+            showAlert('网络错误，上传失败', '上传失败');
+        };
+
+        isUploading = true;
+        xhr.send(formData);
     }
 
     function downloadDataset() {
